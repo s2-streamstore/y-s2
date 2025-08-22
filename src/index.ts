@@ -21,6 +21,7 @@ import {
 import { retrieveSnapshot, uploadSnapshot } from './snapshot.js';
 import { decodeBigEndian64AsNumber, isFenceCommand, isTrimCommand, MessageBatcher, parseFencingToken, Room } from './utils.js';
 import { createSnapshotState, createUserState } from './types.js';
+import { assert } from 'console';
 
 export interface Env {
 	// S2 access token
@@ -28,7 +29,7 @@ export interface Env {
 	// S2 basin name
 	S2_BASIN: string;
 	// R2 bucket for snapshots
-	R2_BUCKET: any;
+	R2_BUCKET: R2Bucket;
 	// Logging mode: CONSOLE | S2_SINGLE | S2_SHARED
 	// CONSOLE: logs to console only
 	// S2_SINGLE: logs to a single S2 stream with a unique worker ID
@@ -396,15 +397,12 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							if (snapshot?.snapshot) {
 								Y.applyUpdateV2(snapShotYdoc, snapshot.snapshot);
 							}
-
-							// todo: get rid of this with assertions
-							const records = snapshotState.recordBuffer.filter((r) => r.seqNum >= snapShotStartSeqNum);
-
-							let recordCount = 0;
+							
+              assert(snapshotState.recordBuffer.every((r) => r.seqNum >= snapShotStartSeqNum));
+              assert(snapshotState.recordBuffer.length == backlogSize)
+							
 							snapShotYdoc.transact(() => {
-								for (const r of records) {
-									recordCount++;
-
+								for (const r of snapshotState.recordBuffer) {									
 									const recordBytes = toUint8Array(r.body!);
 
 									const decoder = decoding.createDecoder(recordBytes);
@@ -415,10 +413,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 											const update = decoding.readVarUint8Array(decoder);
 											Y.applyUpdate(snapShotYdoc, update);
 										}
-									}
-									if (recordCount > backlogSize) {
-										break;
-									}
+									}									
 								}
 							});
 
@@ -426,8 +421,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								'Snapshot created using in-memory records',
 								{
 									room,
-									lastSeqNum: snapshotState.trimSeqNum,
-									recordsProcessed: recordCount,
+									lastSeqNum: snapshotState.trimSeqNum,									
 									totalBufferedRecords: snapshotState.recordBuffer.length,
 								},
 								'SnapshotUpload',
