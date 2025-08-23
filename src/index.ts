@@ -374,6 +374,13 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 									{ room },
 									'FenceAcquisition',
 								);                
+                // ok so issue here is we should not try to lock till we see another fence
+                // a -> lock -> ok
+                //    b -> w, w, w, w
+                // b -> lock -> fail
+                //            a -> snapshot -> unlock
+                //                  b -> lock -> ok -> ends up uploading the same snapshot again
+                // todo..
 								const lockAck = await roomLock.acquireLock(newFencingToken, atob(snapshotState.currentFencingToken));
 								if (lockAck.start.seqNum > snapshotState.lastProcessedFenceSeqNum) {
 									snapshotState.lastProcessedFenceSeqNum = lockAck.start.seqNum;
