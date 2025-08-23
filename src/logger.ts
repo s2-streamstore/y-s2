@@ -28,9 +28,9 @@ export interface LogEntry {
 }
 
 enum LogMode {
-	CONSOLE = '0',
-	S2_SINGLE = '1',
-	S2_SHARED = '2',
+	CONSOLE = 'CONSOLE',
+	S2_SINGLE = 'S2_SINGLE',
+	S2_SHARED = 'S2_SHARED',
 }
 
 export interface LoggerConfig {
@@ -51,7 +51,7 @@ export class S2Logger {
 	private minLevel: LogLevelType;
 	private cfRay?: string;
 	private cfRequestId?: string;
-	private logMode: '0' | '1' | '2';
+	private logMode: LogMode;
 	private readonly levelPriority = {
 		debug: 0,
 		info: 1,
@@ -60,15 +60,15 @@ export class S2Logger {
 	};
 
 	constructor(config: LoggerConfig) {
-		this.logMode = config.logMode ?? '2';
+		this.logMode = config.logMode ?? LogMode.S2_SHARED;
 		this.workerId = config.workerId ?? this.generateWorkerId();
 		this.minLevel = config.minLevel ?? LogLevel.DEBUG;
 
-		if (this.logMode !== '0') {
+		if (this.logMode !== LogMode.CONSOLE) {
 			this.s2Client = config.s2Client;
 			this.s2Basin = config.s2Basin;
 
-			if (this.logMode === '1') {
+			if (this.logMode === LogMode.S2_SINGLE) {
 				this.streamName = config.streamName ?? `logs/worker-${this.workerId}`;
 			} else {
 				this.streamName = config.streamName ?? 'logs/workers-shared';
@@ -105,7 +105,7 @@ export class S2Logger {
 	}
 
 	private async logEntry(entry: LogEntry): Promise<void> {
-		if (this.logMode === '0') {
+		if (this.logMode === LogMode.CONSOLE) {
 			const timestamp = new Date(entry.timestamp).toISOString();
 			const prefix = `[${timestamp}] ${entry.level.toUpperCase()} [${entry.workerId}]`;
 			const message = `${prefix} ${entry.message}`;
@@ -173,7 +173,7 @@ export class S2Logger {
 }
 
 export function createLogger(env: { S2_ACCESS_TOKEN?: string; S2_BASIN?: string; LOG_MODE?: string }, request?: Request): S2Logger {
-	const logMode = (env.LOG_MODE ?? 'CONSOLE') as LogMode;
+	const logMode = (env.LOG_MODE ?? 'S2_SHARED') as LogMode;
 
 	return new S2Logger({
 		s2Client: logMode !== LogMode.CONSOLE ? new S2({ accessToken: env.S2_ACCESS_TOKEN }) : undefined,

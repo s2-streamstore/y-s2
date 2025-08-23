@@ -21,7 +21,7 @@ import {
 import { retrieveSnapshot, uploadSnapshot } from './snapshot.js';
 import { decodeBigEndian64AsNumber, isFenceCommand, isTrimCommand, MessageBatcher, parseFencingToken, Room } from './utils.js';
 import { createSnapshotState, createUserState } from './types.js';
-import { assert } from 'console';
+import assert, { deepStrictEqual } from "node:assert";
 
 export interface Env {
 	// S2 access token
@@ -338,9 +338,11 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							const fenceExpired = (() => {
 								if (!snapshotState.currentFencingToken) return true;
 								try {
-									const { deadline } = parseFencingToken(snapshotState.currentFencingToken);
+									const { deadline } = parseFencingToken(atob(snapshotState.currentFencingToken));
+                  // logger.error(`Fencing token deadline: ${deadline}, expired = ${Date.now() > deadline * 1000}`, { room }, 'FencingTokenCheck');                  
 									return Date.now() > deadline * 1000;
 								} catch {
+                  logger.error('Invalid fencing token format', { room, token: snapshotState.currentFencingToken }, 'FencingTokenError');
 									return false;
 								}
 							})();
@@ -354,6 +356,8 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								(backlogSize >= maxBacklog && fenceExpired) ||
 								(firstRecordExpired && fenceExpired) ||
 								(snapshotState.currentFencingToken && fenceExpired && backlogSize > 0);
+              
+              // logger.error(`Snapshot decision: backlogSize=${backlogSize} (max ${maxBacklog}) firstRecordExpired=${firstRecordExpired} fenceExpired=${fenceExpired} currentFencingToken=${snapshotState.currentFencingToken == ""} currentFT=${snapshotState.currentFencingToken} shouldSnapshot=${shouldSnapshot}`, { room }, 'SnapshotDecision');
 
 							if (!shouldSnapshot) {
 								continue;
@@ -369,8 +373,8 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 									`Acquiring fence with token ${newFencingToken} - prev token was ${snapshotState.currentFencingToken}`,
 									{ room },
 									'FenceAcquisition',
-								);
-								const lockAck = await roomLock.acquireLock(newFencingToken, snapshotState.currentFencingToken);
+								);                
+								const lockAck = await roomLock.acquireLock(newFencingToken, atob(snapshotState.currentFencingToken));
 								if (lockAck.start.seqNum > snapshotState.lastProcessedFenceSeqNum) {
 									snapshotState.lastProcessedFenceSeqNum = lockAck.start.seqNum;
 									snapshotState.currentFencingToken = newFencingToken;
@@ -388,19 +392,21 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							}
 
 							const snapshot = await retrieveSnapshot(env, room, logger);
-							console.log('Snapshot retrieved', snapshot?.lastSeqNum, 'snapshot size', snapshot?.snapshot?.length);
+							// console.log('Snapshot retrieved', snapshot?.lastSeqNum, 'snapshot size', snapshot?.snapshot?.length);
 
 							const snapShotStartSeqNum = snapshot?.lastSeqNum ? snapshot.lastSeqNum + 1 : 0;
+
+              logger.debug("snapShotStartSeqNum", { snapShotStartSeqNum, lastProcessedTrimSeqNum: snapshotState.lastProcessedTrimSeqNum }, 'SnapshotStartSeqNum');
+              deepStrictEqual(snapshot?.lastSeqNum ?? 0, snapshotState.lastProcessedTrimSeqNum, `Snapshot start seqNum mismatch: ${snapshot?.lastSeqNum ?? 0} != ${snapshotState.lastProcessedTrimSeqNum}`);
 
 							const snapShotYdoc = new Y.Doc();
 
 							if (snapshot?.snapshot) {
 								Y.applyUpdateV2(snapShotYdoc, snapshot.snapshot);
 							}
-							
-              assert(snapshotState.recordBuffer.every((r) => r.seqNum >= snapShotStartSeqNum));
-              assert(snapshotState.recordBuffer.length == backlogSize)
-							
+
+              assert(snapshotState.recordBuffer.every((r) => r.seqNum >= snapShotStartSeqNum), "Record buffer seqNum mismatch");
+
 							snapShotYdoc.transact(() => {
 								for (const r of snapshotState.recordBuffer) {									
 									const recordBytes = toUint8Array(r.body!);
