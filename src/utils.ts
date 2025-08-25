@@ -54,6 +54,13 @@ export function parseFencingToken(token: string): { id: string; deadline: number
 	return { id, deadline: Number(deadline) };
 }
 
+export function generateDeadlineFencingToken(): string {
+	const newDeadline = Math.floor(Date.now() / 1000 + 60);
+	const id = crypto.getRandomValues(new Uint8Array(12));
+	const idBase64 = fromUint8Array(id);
+	return `${idBase64} ${newDeadline}`;
+}
+
 export class Room {
 	private s2Client: S2;
 	private stream: string;
@@ -77,6 +84,22 @@ export class Room {
 					},
 				],
 				fencingToken: prevFencingToken,
+			},
+			s2Basin: this.s2Basin,
+		});
+	}
+
+	async releaseLockMiddle(): Promise<AppendAck> {
+		return await this.s2Client.records.append({
+			stream: this.stream,
+			s2Format: 'base64',
+			appendInput: {
+				records: [
+					{
+						body: '',
+						headers: [[btoa(''), btoa('fence')]],
+					},
+				],
 			},
 			s2Basin: this.s2Basin,
 		});
