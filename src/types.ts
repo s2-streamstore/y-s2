@@ -20,6 +20,7 @@ export interface SnapshotState {
 	trimSeqNum: number | null;
 	lastProcessedFenceSeqNum: number;
 	lastProcessedTrimSeqNum: number;
+    lockBlocked: boolean;
 	recordBuffer: SequencedRecord[];
 }
 
@@ -30,6 +31,7 @@ export function createSnapshotState(): SnapshotState {
 		trimSeqNum: null,
 		lastProcessedFenceSeqNum: -1,
 		lastProcessedTrimSeqNum: -1,
+		lockBlocked: false,
 		recordBuffer: [],
 	};
 }

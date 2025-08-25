@@ -299,6 +299,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								if (r.seqNum > snapshotState.lastProcessedFenceSeqNum) {
 									snapshotState.currentFencingToken = r.body ?? '';
 									snapshotState.lastProcessedFenceSeqNum = r.seqNum;
+                  snapshotState.lockBlocked = false;
 									logger.debug(
 										'Received fencing token',
 										{
@@ -361,7 +362,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								(firstRecordExpired && fenceExpired) ||
 								(snapshotState.currentFencingToken && fenceExpired && backlogSize > 0);
 
-							if (!shouldSnapshot) {
+							if (!shouldSnapshot || snapshotState.lockBlocked) {
 								continue;
 							}
 
@@ -382,6 +383,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 									snapshotState.currentFencingToken = newFencingToken;
 								}
 							} catch (err) {
+                snapshotState.lockBlocked = true;
 								logger.error(
 									'Fence acquisition failed, skipping snapshot',
 									{
