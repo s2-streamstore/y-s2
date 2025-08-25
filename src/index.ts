@@ -19,7 +19,7 @@ import {
 	messageSyncUpdate,
 } from './protocol.js';
 import { retrieveSnapshot, uploadSnapshot } from './snapshot.js';
-import { decodeBigEndian64AsNumber, isFenceCommand, isTrimCommand, MessageBatcher, parseFencingToken, Room } from './utils.js';
+import { decodeBigEndian64AsNumber, generateDeadlineFencingToken, isFenceCommand, isTrimCommand, MessageBatcher, parseFencingToken, Room } from './utils.js';
 import { createSnapshotState, createUserState } from './types.js';
 import assert from 'node:assert';
 import { TailResponse } from '@s2-dev/streamstore/models/errors';
@@ -366,10 +366,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								continue;
 							}
 
-							const newDeadline = Math.floor(Date.now() / 1000 + 60);
-							const id = crypto.getRandomValues(new Uint8Array(12));
-							const idBase64 = fromUint8Array(id);
-							const newFencingToken = `${idBase64} ${newDeadline}`;
+							const newFencingToken = generateDeadlineFencingToken();
 
 							try {
 								logger.debug(
