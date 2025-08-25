@@ -21,6 +21,8 @@ import {
 import { retrieveSnapshot, uploadSnapshot } from './snapshot.js';
 import { decodeBigEndian64AsNumber, isFenceCommand, isTrimCommand, MessageBatcher, parseFencingToken, Room } from './utils.js';
 import { createSnapshotState, createUserState } from './types.js';
+import assert from 'node:assert';
+import { TailResponse } from '@s2-dev/streamstore/models/errors';
 
 export interface Env {
 	// S2 access token
@@ -28,7 +30,7 @@ export interface Env {
 	// S2 basin name
 	S2_BASIN: string;
 	// R2 bucket for snapshots
-	R2_BUCKET: any;
+	R2_BUCKET: R2Bucket;
 	// Logging mode: CONSOLE | S2_SINGLE | S2_SHARED
 	// CONSOLE: logs to console only
 	// S2_SINGLE: logs to a single S2 stream with a unique worker ID
@@ -168,14 +170,17 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
 			catchupRecords = (catchupResult as ReadBatch).records;
 		} catch (err) {
-			logger.error(
-				'Failed to read records from S2',
-				{
-					room,
-					error: err instanceof Error ? err.message : String(err),
-				},
-				'S2ReadError',
-			);
+			if (err instanceof TailResponse) {
+				assert(err.tail.seqNum == 0);
+				logger.error(
+					'Failed to read records from S2',
+					{
+						room,
+						error: err instanceof Error ? err.message : String(err),
+					},
+					'S2ReadError',
+				);
+			}
 			catchupRecords = [];
 		}
 
@@ -294,6 +299,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								if (r.seqNum > snapshotState.lastProcessedFenceSeqNum) {
 									snapshotState.currentFencingToken = r.body ?? '';
 									snapshotState.lastProcessedFenceSeqNum = r.seqNum;
+									snapshotState.lockBlocked = false;
 									logger.debug(
 										'Received fencing token',
 										{
@@ -313,6 +319,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								if (trimSeqNum > snapshotState.lastProcessedTrimSeqNum) {
 									snapshotState.firstRecordAge = null;
 									snapshotState.lastProcessedTrimSeqNum = trimSeqNum;
+									snapshotState.recordBuffer = snapshotState.recordBuffer.filter((r) => r.seqNum > trimSeqNum);
 									logger.debug(
 										'Received trim command',
 										{
@@ -337,9 +344,10 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							const fenceExpired = (() => {
 								if (!snapshotState.currentFencingToken) return true;
 								try {
-									const { deadline } = parseFencingToken(snapshotState.currentFencingToken);
+									const { deadline } = parseFencingToken(atob(snapshotState.currentFencingToken));
 									return Date.now() > deadline * 1000;
 								} catch {
+									logger.error('Invalid fencing token format', { room, token: snapshotState.currentFencingToken }, 'FencingTokenError');
 									return false;
 								}
 							})();
@@ -354,7 +362,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								(firstRecordExpired && fenceExpired) ||
 								(snapshotState.currentFencingToken && fenceExpired && backlogSize > 0);
 
-							if (!shouldSnapshot) {
+							if (!shouldSnapshot || snapshotState.lockBlocked) {
 								continue;
 							}
 
@@ -369,12 +377,13 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 									{ room },
 									'FenceAcquisition',
 								);
-								const lockAck = await roomLock.acquireLock(newFencingToken, snapshotState.currentFencingToken);
+								const lockAck = await roomLock.acquireLock(newFencingToken, atob(snapshotState.currentFencingToken));
 								if (lockAck.start.seqNum > snapshotState.lastProcessedFenceSeqNum) {
 									snapshotState.lastProcessedFenceSeqNum = lockAck.start.seqNum;
 									snapshotState.currentFencingToken = newFencingToken;
 								}
 							} catch (err) {
+								snapshotState.lockBlocked = true;
 								logger.error(
 									'Fence acquisition failed, skipping snapshot',
 									{
@@ -387,9 +396,13 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							}
 
 							const snapshot = await retrieveSnapshot(env, room, logger);
-							console.log('Snapshot retrieved', snapshot?.lastSeqNum, 'snapshot size', snapshot?.snapshot?.length);
 
 							const snapShotStartSeqNum = snapshot?.lastSeqNum ? snapshot.lastSeqNum + 1 : 0;
+
+							assert(
+								snapshot?.lastSeqNum ?? 0 === snapshotState.lastProcessedTrimSeqNum,
+								`Snapshot start seqNum mismatch: ${snapshot?.lastSeqNum ?? 0} != ${snapshotState.lastProcessedTrimSeqNum}`,
+							);
 
 							const snapShotYdoc = new Y.Doc();
 
@@ -397,14 +410,13 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								Y.applyUpdateV2(snapShotYdoc, snapshot.snapshot);
 							}
 
-							// todo: get rid of this with assertions
-							const records = snapshotState.recordBuffer.filter((r) => r.seqNum >= snapShotStartSeqNum);
+							assert(
+								snapshotState.recordBuffer.every((r) => r.seqNum >= snapShotStartSeqNum),
+								`Record buffer seqNum mismatch, ${snapshotState.recordBuffer.map((r) => r.seqNum).join(', ')} vs startSeqNum ${snapShotStartSeqNum}`,
+							);
 
-							let recordCount = 0;
 							snapShotYdoc.transact(() => {
-								for (const r of records) {
-									recordCount++;
-
+								for (const r of snapshotState.recordBuffer) {
 									const recordBytes = toUint8Array(r.body!);
 
 									const decoder = decoding.createDecoder(recordBytes);
@@ -416,9 +428,6 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 											Y.applyUpdate(snapShotYdoc, update);
 										}
 									}
-									if (recordCount > backlogSize) {
-										break;
-									}
 								}
 							});
 
@@ -427,7 +436,6 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								{
 									room,
 									lastSeqNum: snapshotState.trimSeqNum,
-									recordsProcessed: recordCount,
 									totalBufferedRecords: snapshotState.recordBuffer.length,
 								},
 								'SnapshotUpload',
