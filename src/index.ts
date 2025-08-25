@@ -171,7 +171,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			catchupRecords = (catchupResult as ReadBatch).records;
 		} catch (err) {
 			if (err instanceof TailResponse) {
-        assert(err.tail.seqNum == 0);
+				assert(err.tail.seqNum == 0);
 				logger.error(
 					'Failed to read records from S2',
 					{
@@ -299,7 +299,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								if (r.seqNum > snapshotState.lastProcessedFenceSeqNum) {
 									snapshotState.currentFencingToken = r.body ?? '';
 									snapshotState.lastProcessedFenceSeqNum = r.seqNum;
-                  snapshotState.lockBlocked = false;
+									snapshotState.lockBlocked = false;
 									logger.debug(
 										'Received fencing token',
 										{
@@ -383,7 +383,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 									snapshotState.currentFencingToken = newFencingToken;
 								}
 							} catch (err) {
-                snapshotState.lockBlocked = true;
+								snapshotState.lockBlocked = true;
 								logger.error(
 									'Fence acquisition failed, skipping snapshot',
 									{
@@ -400,8 +400,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							const snapShotStartSeqNum = snapshot?.lastSeqNum ? snapshot.lastSeqNum + 1 : 0;
 
 							assert(
-								snapshot?.lastSeqNum ?? 0 ===
-								snapshotState.lastProcessedTrimSeqNum,
+								snapshot?.lastSeqNum ?? 0 === snapshotState.lastProcessedTrimSeqNum,
 								`Snapshot start seqNum mismatch: ${snapshot?.lastSeqNum ?? 0} != ${snapshotState.lastProcessedTrimSeqNum}`,
 							);
 
