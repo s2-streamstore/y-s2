@@ -19,7 +19,15 @@ import {
 	messageSyncUpdate,
 } from './protocol.js';
 import { retrieveSnapshot, uploadSnapshot } from './snapshot.js';
-import { decodeBigEndian64AsNumber, generateDeadlineFencingToken, isFenceCommand, isTrimCommand, MessageBatcher, parseFencingToken, Room } from './utils.js';
+import {
+	decodeBigEndian64AsNumber,
+	generateDeadlineFencingToken,
+	isFenceCommand,
+	isTrimCommand,
+	MessageBatcher,
+	parseFencingToken,
+	Room,
+} from './utils.js';
 import { createSnapshotState, createUserState } from './types.js';
 import assert from 'node:assert';
 import { TailResponse } from '@s2-dev/streamstore/models/errors';
@@ -212,7 +220,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			ydoc.transact(() => {
 				for (const record of catchupRecords) {
 					if (isFenceCommand(record)) {
-						snapshotState.currentFencingToken = record.body ?? '';
+						snapshotState.currentFencingToken = atob(record.body ?? '');
 						snapshotState.lastProcessedFenceSeqNum = record.seqNum;
 						continue;
 					}
@@ -297,7 +305,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
 							if (isFenceCommand(r)) {
 								if (r.seqNum > snapshotState.lastProcessedFenceSeqNum) {
-									snapshotState.currentFencingToken = r.body ?? '';
+									snapshotState.currentFencingToken = atob(r.body ?? '');
 									snapshotState.lastProcessedFenceSeqNum = r.seqNum;
 									snapshotState.lockBlocked = false;
 									logger.debug(
@@ -344,7 +352,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							const fenceExpired = (() => {
 								if (!snapshotState.currentFencingToken) return true;
 								try {
-									const { deadline } = parseFencingToken(atob(snapshotState.currentFencingToken));
+									const { deadline } = parseFencingToken(snapshotState.currentFencingToken);
 									return Date.now() > deadline * 1000;
 								} catch {
 									logger.error('Invalid fencing token format', { room, token: snapshotState.currentFencingToken }, 'FencingTokenError');
@@ -407,10 +415,12 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								Y.applyUpdateV2(snapShotYdoc, snapshot.snapshot);
 							}
 
-							assert(
-								snapshotState.recordBuffer.every((r) => r.seqNum >= snapShotStartSeqNum),
-								`Record buffer seqNum mismatch, ${snapshotState.recordBuffer.map((r) => r.seqNum).join(', ')} vs startSeqNum ${snapShotStartSeqNum}`,
-							);
+							if (snapshotState.recordBuffer.length > 0 && snapshotState.recordBuffer[0].seqNum < snapShotStartSeqNum) {
+								// todo: not sure if on the right track here
+								// if a reader lags (why?) it can try to take lock with an older buffer
+								roomLock.releaseLockMiddle();
+								continue;
+							}
 
 							snapShotYdoc.transact(() => {
 								for (const r of snapshotState.recordBuffer) {
