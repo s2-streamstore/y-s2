@@ -451,6 +451,8 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							const newSnapshot = Y.encodeStateAsUpdateV2(snapShotYdoc);
 							await uploadSnapshot(env, room, newSnapshot, snapshotState.trimSeqNum, logger);
 
+							snapShotYdoc.destroy();
+
 							snapshotState.recordBuffer = [];
 							snapshotState.firstRecordAge = null;
 
