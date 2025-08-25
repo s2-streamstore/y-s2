@@ -5,7 +5,7 @@ import * as Y from 'yjs';
 import * as decoding from 'lib0/decoding';
 import * as awarenessProtocol from 'y-protocols/awareness';
 import * as array from 'lib0/array';
-import { fromUint8Array, toUint8Array } from 'js-base64';
+import { toUint8Array } from 'js-base64';
 import { createLogger } from './logger.js';
 import {
 	encodeAwarenessUpdate,
@@ -261,8 +261,6 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				}
 			});
 
-			ydoc.destroy();
-
 			logger.debug(
 				'Catchup transaction completed',
 				{
@@ -281,6 +279,9 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 		if (awareness.states.size > 0) {
 			server.send(encodeAwarenessUpdate(awareness, array.from(awareness.states.keys())));
 		}
+
+		ydoc.destroy();
+		awareness.destroy();
 
 		const messageBatcher = new MessageBatcher(s2Client, streamName, env.S2_BASIN, logger, room, batchSize, lingerTime);
 
@@ -382,7 +383,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 									{ room },
 									'FenceAcquisition',
 								);
-								const lockAck = await roomLock.acquireLock(newFencingToken, atob(snapshotState.currentFencingToken));
+								const lockAck = await roomLock.acquireLock(newFencingToken, snapshotState.currentFencingToken);
 								if (lockAck.start.seqNum > snapshotState.lastProcessedFenceSeqNum) {
 									snapshotState.lastProcessedFenceSeqNum = lockAck.start.seqNum;
 									snapshotState.currentFencingToken = newFencingToken;
@@ -418,7 +419,11 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							if (snapshotState.recordBuffer.length > 0 && snapshotState.recordBuffer[0].seqNum < snapShotStartSeqNum) {
 								// todo: not sure if on the right track here
 								// if a reader lags (why?) it can try to take lock with an older buffer
-								roomLock.releaseLockMiddle();
+								const releaseAck = await roomLock.releaseLockMiddle();
+								if (releaseAck.start.seqNum > snapshotState.lastProcessedFenceSeqNum) {
+									snapshotState.lastProcessedFenceSeqNum = releaseAck.start.seqNum;
+									snapshotState.currentFencingToken = '';
+								}
 								continue;
 							}
 
