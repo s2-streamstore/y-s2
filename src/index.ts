@@ -1,6 +1,6 @@
 import { S2 } from '@s2-dev/streamstore';
 import type { EventStream } from '@s2-dev/streamstore/lib/event-streams.js';
-import { S2Format, type ReadBatch, type ReadEvent, type SequencedRecord } from '@s2-dev/streamstore/models/components';
+import { S2Format, type ReadEvent } from '@s2-dev/streamstore/models/components';
 import * as Y from 'yjs';
 import * as decoding from 'lib0/decoding';
 import * as awarenessProtocol from 'y-protocols/awareness';
@@ -30,7 +30,6 @@ import {
 } from './utils.js';
 import { createSnapshotState, createUserState } from './types.js';
 import assert from 'node:assert';
-import { TailResponse } from '@s2-dev/streamstore/models/errors';
 
 export interface Env {
 	// S2 access token
@@ -56,8 +55,6 @@ export interface Env {
 	// Represented as: `{id} {lockDeadline}`
 	LOCK_DEADLINE?: number;
 }
-
-const CATCHUP_LIMIT = 1000;
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
@@ -157,147 +154,39 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 		snapshotState.lastProcessedTrimSeqNum = lastSeqNum;
 		const catchupSeqNum = snapshotResult ? lastSeqNum + 1 : 0;
 
+		const tailResponse = await s2Client.records.checkTail({
+			stream: streamName,
+			s2Basin: env.S2_BASIN,
+		});
+		const tailSeqNum = tailResponse.tail.seqNum;
+
 		logger.info(
 			'Starting catchup from S2',
 			{
 				room,
 				fromSeqNum: catchupSeqNum,
+				toSeqNum: tailSeqNum,
 			},
 			'S2Catchup',
 		);
-
-		let catchupRecords: SequencedRecord[] = [];
-		try {
-			const catchupResult = await s2Client.records.read({
-				stream: streamName,
-				s2Basin: env.S2_BASIN,
-				seqNum: catchupSeqNum,
-				s2Format: S2Format.Base64,
-				count: CATCHUP_LIMIT,
-			});
-
-			catchupRecords = (catchupResult as ReadBatch).records;
-		} catch (err) {
-			if (err instanceof TailResponse) {
-				assert(err.tail.seqNum == 0);
-				logger.error(
-					'Failed to read records from S2',
-					{
-						room,
-						error: err instanceof Error ? err.message : String(err),
-					},
-					'S2ReadError',
-				);
-			}
-			catchupRecords = [];
-		}
-
-		// if we didnt do any catchup -> start tailing later
-		let startReadSeqNum = catchupSeqNum;
-
-		if (catchupRecords && catchupRecords.length > 0) {
-			const lastRecord = catchupRecords[catchupRecords.length - 1];
-
-			if (lastRecord) {
-				startReadSeqNum = lastRecord.seqNum + 1;
-			}
-
-			logger.info(
-				'Applying catchup records',
-				{
-					room,
-					recordCount: catchupRecords.length,
-					finalSeqNum: catchupSeqNum,
-				},
-				'S2Catchup',
-			);
-
-			let docChanged = false;
-			ydoc.once('afterTransaction', (tr) => {
-				docChanged = tr.changed.size > 0;
-			});
-
-			ydoc.transact(() => {
-				for (const record of catchupRecords) {
-					if (isFenceCommand(record)) {
-						snapshotState.currentFencingToken = atob(record.body ?? '');
-						snapshotState.lastProcessedFenceSeqNum = record.seqNum;
-						continue;
-					}
-					if (record.body) {
-						if (isTrimCommand(record)) {
-							snapshotState.lastProcessedTrimSeqNum = decodeBigEndian64AsNumber(record.body);
-							continue;
-						}
-						snapshotState.recordBuffer.push(record);
-
-						try {
-							const recordBytes = toUint8Array(record.body);
-
-							const decoder = decoding.createDecoder(recordBytes);
-							const messageType = decoding.readUint8(decoder);
-
-							if (messageType === messageSync) {
-								const syncType = decoding.readUint8(decoder);
-								if (syncType === messageSyncUpdate || syncType === messageSyncStep2) {
-									const update = decoding.readVarUint8Array(decoder);
-									Y.applyUpdate(ydoc, update);
-								}
-							} else if (messageType === messageAwareness) {
-								const awarenessUpdate = decoding.readVarUint8Array(decoder);
-								awarenessProtocol.applyAwarenessUpdate(awareness, awarenessUpdate, null);
-							}
-						} catch (err) {
-							logger.error(
-								'Failed to apply catchup record',
-								{
-									room,
-									error: err instanceof Error ? err.message : String(err),
-								},
-								'CatchupError',
-							);
-						}
-					}
-				}
-			});
-
-			logger.debug(
-				'Catchup transaction completed',
-				{
-					room,
-					docChanged,
-					recordCount: catchupRecords.length,
-				},
-				'CatchupComplete',
-			);
-		}
-
-		// no ws.cork kinda thing on workers
-		server.send(encodeSyncStep1(Y.encodeStateVector(ydoc)));
-		server.send(encodeSyncStep2(Y.encodeStateAsUpdate(ydoc)));
-
-		if (awareness.states.size > 0) {
-			server.send(encodeAwarenessUpdate(awareness, array.from(awareness.states.keys())));
-		}
-
-		ydoc.destroy();
-		awareness.destroy();
 
 		const messageBatcher = new MessageBatcher(s2Client, streamName, env.S2_BASIN, logger, room, batchSize, lingerTime);
 
 		(async () => {
 			try {
-				logger.info('Starting S2 event stream', { room, startReadSeqNum }, 'S2EventStream');
+				logger.info('Starting S2 event stream', { room, catchupSeqNum }, 'S2EventStream');
 				const events = await s2Client.records.read(
 					{
 						stream: streamName,
 						s2Basin: env.S2_BASIN,
-						seqNum: startReadSeqNum,
-						s2Format: 'base64',
+						seqNum: catchupSeqNum,
+						s2Format: S2Format.Base64,
 						clamp: true,
 					},
 					{ acceptHeaderOverride: 'text/event-stream' as any },
 				);
+
+				let isCatchingUp = catchupSeqNum <= tailSeqNum;
 
 				for await (const event of events as EventStream<ReadEvent>) {
 					if (event.event === 'batch' && event.data?.records) {
@@ -308,7 +197,9 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								if (r.seqNum > snapshotState.lastProcessedFenceSeqNum) {
 									snapshotState.currentFencingToken = atob(r.body ?? '');
 									snapshotState.lastProcessedFenceSeqNum = r.seqNum;
-									snapshotState.lockBlocked = false;
+									if (!r.body) {
+										snapshotState.lockBlocked = false;
+									}
 									logger.debug(
 										'Received fencing token',
 										{
@@ -345,6 +236,78 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
 							if (snapshotState.firstRecordAge === null) {
 								snapshotState.firstRecordAge = r.timestamp;
+							}
+
+							if (isCatchingUp) {
+								if (r.seqNum >= tailSeqNum) {
+									isCatchingUp = false;
+									logger.info(
+										'Catchup completed, processing records',
+										{
+											room,
+											recordCount: snapshotState.recordBuffer.length,
+											finalSeqNum: r.seqNum,
+										},
+										'S2Catchup',
+									);
+
+									let docChanged = false;
+									ydoc.once('afterTransaction', (tr) => {
+										docChanged = tr.changed.size > 0;
+									});
+
+									ydoc.transact(() => {
+										for (const record of snapshotState.recordBuffer) {
+											try {
+												const recordBytes = toUint8Array(record.body!);
+
+												const decoder = decoding.createDecoder(recordBytes);
+												const messageType = decoding.readUint8(decoder);
+
+												if (messageType === messageSync) {
+													const syncType = decoding.readUint8(decoder);
+													if (syncType === messageSyncUpdate || syncType === messageSyncStep2) {
+														const update = decoding.readVarUint8Array(decoder);
+														Y.applyUpdate(ydoc, update);
+													}
+												} else if (messageType === messageAwareness) {
+													const awarenessUpdate = decoding.readVarUint8Array(decoder);
+													awarenessProtocol.applyAwarenessUpdate(awareness, awarenessUpdate, null);
+												}
+											} catch (err) {
+												logger.error(
+													'Failed to apply catchup record',
+													{
+														room,
+														error: err instanceof Error ? err.message : String(err),
+													},
+													'CatchupError',
+												);
+											}
+										}
+									});
+
+									logger.debug(
+										'Catchup transaction completed',
+										{
+											room,
+											docChanged,
+											recordCount: snapshotState.recordBuffer.length,
+										},
+										'CatchupComplete',
+									);
+
+									server.send(encodeSyncStep1(Y.encodeStateVector(ydoc)));
+									server.send(encodeSyncStep2(Y.encodeStateAsUpdate(ydoc)));
+
+									if (awareness.states.size > 0) {
+										server.send(encodeAwarenessUpdate(awareness, array.from(awareness.states.keys())));
+									}
+
+									ydoc.destroy();
+									awareness.destroy();
+								}
+								continue;
 							}
 
 							const recordBytes = toUint8Array(r.body);
