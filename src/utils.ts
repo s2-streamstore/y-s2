@@ -89,7 +89,7 @@ export class Room {
 		});
 	}
 
-	async releaseLockMiddle(): Promise<AppendAck> {
+	async forceReleaseLock(): Promise<AppendAck> {
 		return await this.s2Client.records.append({
 			stream: this.stream,
 			s2Format: 'base64',

@@ -6,7 +6,7 @@ import * as decoding from 'lib0/decoding';
 import * as awarenessProtocol from 'y-protocols/awareness';
 import * as array from 'lib0/array';
 import { toUint8Array } from 'js-base64';
-import { createLogger } from './logger.js';
+import { createLogger, S2Logger } from './logger.js';
 import {
 	encodeAwarenessUpdate,
 	encodeAwarenessUserDisconnected,
@@ -28,7 +28,7 @@ import {
 	parseFencingToken,
 	Room,
 } from './utils.js';
-import { createSnapshotState, createUserState } from './types.js';
+import { createSnapshotState, createUserState, SnapshotState } from './types.js';
 import assert from 'node:assert';
 
 export interface Env {
@@ -79,7 +79,7 @@ export default {
 		}
 
 		if (url.pathname.match(/^\/auth\/perm\/(.+)\/(.+)$/)) {
-			return handlePermissionCheck(request, env);
+			return handlePermissionCheck(request);
 		}
 
 		return new Response('Y-S2', { status: 200 });
@@ -338,99 +338,9 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								continue;
 							}
 
-							const newFencingToken = generateDeadlineFencingToken();
+							snapshotState.lockBlocked = true;
 
-							try {
-								logger.debug(
-									`Acquiring fence with token ${newFencingToken} - prev token was ${snapshotState.currentFencingToken}`,
-									{ room },
-									'FenceAcquisition',
-								);
-								const lockAck = await roomLock.acquireLock(newFencingToken, snapshotState.currentFencingToken);
-								if (lockAck.start.seqNum > snapshotState.lastProcessedFenceSeqNum) {
-									snapshotState.lastProcessedFenceSeqNum = lockAck.start.seqNum;
-									snapshotState.currentFencingToken = newFencingToken;
-								}
-							} catch (err) {
-								snapshotState.lockBlocked = true;
-								logger.error(
-									'Fence acquisition failed, skipping snapshot',
-									{
-										room,
-										error: err instanceof Error ? err.message : String(err),
-									},
-									'SnapshotError',
-								);
-								continue;
-							}
-
-							const snapshot = await retrieveSnapshot(env, room, logger);
-
-							const snapShotStartSeqNum = snapshot?.lastSeqNum ? snapshot.lastSeqNum + 1 : 0;
-
-							assert(
-								snapshot?.lastSeqNum ?? 0 === snapshotState.lastProcessedTrimSeqNum,
-								`Snapshot start seqNum mismatch: ${snapshot?.lastSeqNum ?? 0} != ${snapshotState.lastProcessedTrimSeqNum}`,
-							);
-
-							const snapShotYdoc = new Y.Doc();
-
-							if (snapshot?.snapshot) {
-								Y.applyUpdateV2(snapShotYdoc, snapshot.snapshot);
-							}
-
-							if (snapshotState.recordBuffer.length > 0 && snapshotState.recordBuffer[0].seqNum < snapShotStartSeqNum) {
-								// todo: not sure if on the right track here
-								// if a reader lags (why?) it can try to take lock with an older buffer
-								const releaseAck = await roomLock.releaseLockMiddle();
-								if (releaseAck.start.seqNum > snapshotState.lastProcessedFenceSeqNum) {
-									snapshotState.lastProcessedFenceSeqNum = releaseAck.start.seqNum;
-									snapshotState.currentFencingToken = '';
-								}
-								continue;
-							}
-
-							snapShotYdoc.transact(() => {
-								for (const r of snapshotState.recordBuffer) {
-									const recordBytes = toUint8Array(r.body!);
-
-									const decoder = decoding.createDecoder(recordBytes);
-									const messageType = decoding.readUint8(decoder);
-									if (messageType === messageSync) {
-										const syncType = decoding.readUint8(decoder);
-										if (syncType === messageSyncUpdate || syncType === messageSyncStep2) {
-											const update = decoding.readVarUint8Array(decoder);
-											Y.applyUpdate(snapShotYdoc, update);
-										}
-									}
-								}
-							});
-
-							logger.info(
-								'Snapshot created using in-memory records',
-								{
-									room,
-									lastSeqNum: snapshotState.trimSeqNum,
-									totalBufferedRecords: snapshotState.recordBuffer.length,
-								},
-								'SnapshotUpload',
-							);
-
-							const newSnapshot = Y.encodeStateAsUpdateV2(snapShotYdoc);
-							await uploadSnapshot(env, room, newSnapshot, snapshotState.trimSeqNum, logger);
-
-							snapShotYdoc.destroy();
-
-							snapshotState.recordBuffer = [];
-							snapshotState.firstRecordAge = null;
-
-							const releaseAck = await roomLock.releaseLock(snapshotState.trimSeqNum!, newFencingToken);
-							if (releaseAck.start.seqNum > snapshotState.lastProcessedFenceSeqNum) {
-								snapshotState.lastProcessedFenceSeqNum = releaseAck.start.seqNum;
-								snapshotState.currentFencingToken = '';
-							}
-							snapshotState.lastProcessedTrimSeqNum = snapshotState.trimSeqNum!;
-							snapshotState.firstRecordAge = null;
+							takeSnapshot(env, room, { ...snapshotState, recordBuffer: [...snapshotState.recordBuffer] }, roomLock, logger);
 						}
 					}
 				}
@@ -580,7 +490,7 @@ async function handleAuthToken(env: Env, request: Request): Promise<Response> {
 	}
 }
 
-async function handlePermissionCheck(request: Request, env: Env): Promise<Response> {
+async function handlePermissionCheck(request: Request): Promise<Response> {
 	const url = new URL(request.url);
 
 	const match = url.pathname.match(/^\/auth\/perm\/(.+)\/(.+)$/);
@@ -602,4 +512,142 @@ async function handlePermissionCheck(request: Request, env: Env): Promise<Respon
 			'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 		},
 	});
+}
+
+async function takeSnapshot(env: Env, room: string, snapshotStateCopy: SnapshotState, roomLock: Room, logger: S2Logger): Promise<void> {
+	const newFencingToken = generateDeadlineFencingToken();
+
+	try {
+		logger.debug(
+			`Acquiring fence with token ${newFencingToken} - prev token was ${snapshotStateCopy.currentFencingToken}`,
+			{ room },
+			'FenceAcquisition',
+		);
+
+		await roomLock.acquireLock(newFencingToken, snapshotStateCopy.currentFencingToken);
+	} catch (err) {
+		logger.error(
+			'Fence acquisition failed, skipping snapshot',
+			{
+				room,
+				error: err instanceof Error ? err.message : String(err),
+			},
+			'SnapshotError',
+		);
+		return;
+	}
+
+	try {
+		const snapshot = await retrieveSnapshot(env, room, logger);
+		const snapShotStartSeqNum = snapshot?.lastSeqNum ? snapshot.lastSeqNum + 1 : 0;
+
+		assert(
+			snapshot?.lastSeqNum ?? 0 === snapshotStateCopy.lastProcessedTrimSeqNum,
+			`Snapshot start seqNum mismatch: ${snapshot?.lastSeqNum ?? 0} != ${snapshotStateCopy.lastProcessedTrimSeqNum}`,
+		);
+
+		const snapShotYdoc = new Y.Doc();
+
+		if (snapshot?.snapshot) {
+			Y.applyUpdateV2(snapShotYdoc, snapshot.snapshot);
+		}
+
+		if (snapshotStateCopy.recordBuffer.length > 0 && snapshotStateCopy.recordBuffer[0].seqNum < snapShotStartSeqNum) {
+			logger.warn(
+				'Record buffer is stale, releasing lock and aborting snapshot',
+				{
+					room,
+					firstRecordSeqNum: snapshotStateCopy.recordBuffer[0].seqNum,
+					snapShotStartSeqNum,
+				},
+				'StaleBuffer',
+			);
+
+			await roomLock.forceReleaseLock();
+			snapShotYdoc.destroy();
+			return;
+		}
+
+		snapShotYdoc.transact(() => {
+			for (const r of snapshotStateCopy.recordBuffer) {
+				if (!r.body) continue;
+
+				try {
+					const recordBytes = toUint8Array(r.body);
+					const decoder = decoding.createDecoder(recordBytes);
+					const messageType = decoding.readUint8(decoder);
+
+					if (messageType === messageSync) {
+						const syncType = decoding.readUint8(decoder);
+						if (syncType === messageSyncUpdate || syncType === messageSyncStep2) {
+							const update = decoding.readVarUint8Array(decoder);
+							Y.applyUpdate(snapShotYdoc, update);
+						}
+					}
+				} catch (err) {
+					logger.error(
+						'Failed to apply record during snapshot creation',
+						{
+							room,
+							recordSeqNum: r.seqNum,
+							error: err instanceof Error ? err.message : String(err),
+						},
+						'SnapshotRecordError',
+					);
+				}
+			}
+		});
+
+		logger.info(
+			'Snapshot created using in-memory records',
+			{
+				room,
+				lastSeqNum: snapshotStateCopy.trimSeqNum,
+				totalBufferedRecords: snapshotStateCopy.recordBuffer.length,
+			},
+			'SnapshotUpload',
+		);
+
+		const newSnapshot = Y.encodeStateAsUpdateV2(snapShotYdoc);
+		await uploadSnapshot(env, room, newSnapshot, snapshotStateCopy.trimSeqNum!, logger);
+
+		snapShotYdoc.destroy();
+
+		await roomLock.releaseLock(snapshotStateCopy.trimSeqNum!, newFencingToken);
+
+		logger.info(
+			'Snapshot process completed successfully',
+			{
+				room,
+				fencingToken: newFencingToken,
+				recordsProcessed: snapshotStateCopy.recordBuffer.length,
+				finalSeqNum: snapshotStateCopy.trimSeqNum,
+			},
+			'SnapshotSuccess',
+		);
+	} catch (err) {
+		logger.error(
+			'Snapshot process failed after acquiring lock',
+			{
+				room,
+				fencingToken: newFencingToken,
+				error: err instanceof Error ? err.message : String(err),
+			},
+			'SnapshotProcessError',
+		);
+
+		try {
+			await roomLock.forceReleaseLock();
+		} catch (releaseErr) {
+			logger.error(
+				'Failed to release lock after snapshot error',
+				{
+					room,
+					fencingToken: newFencingToken,
+					error: releaseErr instanceof Error ? releaseErr.message : String(releaseErr),
+				},
+				'LockReleaseError',
+			);
+		}
+	}
 }
