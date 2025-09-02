@@ -158,7 +158,8 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			stream: streamName,
 			s2Basin: env.S2_BASIN,
 		});
-		const tailSeqNum = tailResponse.tail.seqNum;
+
+		const tailSeqNum = tailResponse.tail.seqNum === 0 ? 0 : tailResponse.tail.seqNum - 1;
 
 		logger.info(
 			'Starting catchup from S2',
@@ -186,7 +187,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					{ acceptHeaderOverride: 'text/event-stream' as any },
 				);
 
-				let isCatchingUp = catchupSeqNum <= tailSeqNum;
+				let isCatchingUp = catchupSeqNum < tailSeqNum;
 
 				for await (const event of events as EventStream<ReadEvent>) {
 					if (event.event === 'batch' && event.data?.records) {
