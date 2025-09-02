@@ -18,7 +18,7 @@ export function parseConfig(env: any): Config {
 		batchSize: env.S2_BATCH_SIZE ? parseInt(env.S2_BATCH_SIZE, 10) : 8,
 		lingerTime: env.S2_LINGER_TIME ? parseInt(env.S2_LINGER_TIME, 10) : 50,
 		leaseDuration: env.LEASE_DURATION ? parseInt(env.LEASE_DURATION, 10) : 30,
-		backlogBufferAge: env.BACKLOG_BUFFER_AGE ? parseInt(env.BACKLOG_BUFFER_AGE, 10) : 60,
+		backlogBufferAge: env.BACKLOG_BUFFER_AGE ? parseInt(env.BACKLOG_BUFFER_AGE, 10) : 60_000,
 	};
 }
 
