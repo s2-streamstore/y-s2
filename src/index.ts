@@ -25,6 +25,7 @@ import {
 	isFenceCommand,
 	isTrimCommand,
 	MessageBatcher,
+	parseConfig,
 	parseFencingToken,
 	Room,
 } from './utils.js';
@@ -51,9 +52,9 @@ export interface Env {
 	S2_BATCH_SIZE?: string;
 	// Maximum time to wait before flushing a batch to S2
 	S2_LINGER_TIME?: string;
-	// Fencing token lock deadline in seconds
-	// Represented as: `{id} {lockDeadline}`
-	LOCK_DEADLINE?: number;
+	// Fencing token lease duration in seconds
+	// Represented as: `{id} {leaseDeadline}`
+	LEASE_DURATION?: number;
 }
 
 export default {
@@ -94,11 +95,11 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 	}
 
 	const url = new URL(request.url);
-	const room = url.searchParams.get('room');
+	const roomName = url.searchParams.get('room');
 	const authToken = url.searchParams.get('yauth');
 
-	if (!room || !authToken) {
-		logger.error('Missing required parameters', { room: !!room, authToken: !!authToken }, 'WebSocketValidation');
+	if (!roomName || !authToken) {
+		logger.error('Missing required parameters', { room: !!roomName, authToken: !!authToken }, 'WebSocketValidation');
 		return new Response('Missing room or auth token', { status: 400 });
 	}
 
@@ -112,35 +113,34 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 		const client = pair[0];
 		const server = pair[1];
 		server.accept();
-		logger.info('WebSocket connection established', { room }, 'WebSocketConnection');
+		logger.info('WebSocket connection established', { roomName }, 'WebSocketConnection');
 
 		const s2Client = new S2({ accessToken: env.S2_ACCESS_TOKEN });
-		const streamName = `rooms/${encodeURIComponent(room)}/index`;
-		const maxBacklog = env.SNAPSHOT_BACKLOG_SIZE ? parseInt(env.SNAPSHOT_BACKLOG_SIZE, 10) : 100;
-		const batchSize = env.S2_BATCH_SIZE ? parseInt(env.S2_BATCH_SIZE, 10) : 8;
-		const lingerTime = env.S2_LINGER_TIME ? parseInt(env.S2_LINGER_TIME, 10) : 50;
+		const streamName = `rooms/${encodeURIComponent(roomName)}/index`;
 
-		const roomLock = new Room(s2Client, streamName, env.S2_BASIN);
+		const { maxBacklog, batchSize, lingerTime, leaseDuration, backlogBufferAge } = parseConfig(env);
+
+		const room = new Room(s2Client, streamName, env.S2_BASIN);
 
 		const ydoc = new Y.Doc();
 		const awareness = new awarenessProtocol.Awareness(ydoc);
 		awareness.setLocalState(null);
 
-		const userState = createUserState(room);
+		const userState = createUserState(roomName);
 
-		const snapshotResult = await retrieveSnapshot(env, room, logger);
+		const checkpoint = await retrieveSnapshot(env, roomName, logger);
 
-		if (snapshotResult?.snapshot) {
+		if (checkpoint?.snapshot) {
 			logger.info(
 				'Snapshot retrieved, applying to document',
 				{
 					room,
-					lastSeqNum: snapshotResult.lastSeqNum,
-					snapshotSize: snapshotResult.snapshot.length,
+					lastSeqNum: checkpoint.lastSeqNum,
+					snapshotSize: checkpoint.snapshot.length,
 				},
 				'SnapshotRestore',
 			);
-			Y.applyUpdateV2(ydoc, snapshotResult.snapshot);
+			Y.applyUpdateV2(ydoc, checkpoint.snapshot);
 		} else {
 			logger.debug('No snapshot found, starting with empty document', { room }, 'SnapshotRestore');
 		}
@@ -150,9 +150,9 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 		// seqNum where we will start the catchup from
 		// no snapshot -> 0
 		// else -> lastSeqNum + 1
-		const lastSeqNum = snapshotResult?.lastSeqNum ?? 0;
+		const lastSeqNum = checkpoint?.lastSeqNum ?? 0;
 		snapshotState.lastProcessedTrimSeqNum = lastSeqNum;
-		const catchupSeqNum = snapshotResult ? lastSeqNum + 1 : 0;
+		const catchupSeqNum = checkpoint ? lastSeqNum + 1 : 0;
 
 		const tailResponse = await s2Client.records.checkTail({
 			stream: streamName,
@@ -170,7 +170,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			'S2Catchup',
 		);
 
-		const messageBatcher = new MessageBatcher(s2Client, streamName, env.S2_BASIN, logger, room, batchSize, lingerTime);
+		const messageBatcher = new MessageBatcher(s2Client, streamName, env.S2_BASIN, logger, roomName, batchSize, lingerTime);
 
 		(async () => {
 			try {
@@ -324,7 +324,8 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								}
 							})();
 
-							const firstRecordExpired = snapshotState.firstRecordAge !== null && Date.now() - snapshotState.firstRecordAge > 60_000;
+							const firstRecordExpired =
+								snapshotState.firstRecordAge !== null && Date.now() - snapshotState.firstRecordAge > backlogBufferAge;
 
 							const backlogSize =
 								snapshotState.trimSeqNum !== null ? snapshotState.trimSeqNum + 1 - snapshotState.lastProcessedTrimSeqNum : 0;
@@ -340,7 +341,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
 							snapshotState.lockBlocked = true;
 
-							takeSnapshot(env, room, { ...snapshotState, recordBuffer: [...snapshotState.recordBuffer] }, roomLock, logger);
+							takeSnapshot(env, leaseDuration, roomName, { ...snapshotState, recordBuffer: [...snapshotState.recordBuffer] }, room, logger);
 						}
 					}
 				}
@@ -459,7 +460,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			'WebSocket handler failed',
 			{
 				error: err instanceof Error ? err.message : String(err),
-				room: room,
+				room: roomName,
 			},
 			'WebSocketHandlerError',
 		);
@@ -514,8 +515,15 @@ async function handlePermissionCheck(request: Request): Promise<Response> {
 	});
 }
 
-async function takeSnapshot(env: Env, room: string, snapshotStateCopy: SnapshotState, roomLock: Room, logger: S2Logger): Promise<void> {
-	const newFencingToken = generateDeadlineFencingToken();
+async function takeSnapshot(
+	env: Env,
+	leaseDuration: number,
+	roomName: string,
+	snapshotStateCopy: SnapshotState,
+	room: Room,
+	logger: S2Logger,
+): Promise<void> {
+	const newFencingToken = generateDeadlineFencingToken(leaseDuration);
 
 	try {
 		logger.debug(
@@ -524,7 +532,7 @@ async function takeSnapshot(env: Env, room: string, snapshotStateCopy: SnapshotS
 			'FenceAcquisition',
 		);
 
-		await roomLock.acquireLock(newFencingToken, snapshotStateCopy.currentFencingToken);
+		await room.acquireLease(newFencingToken, snapshotStateCopy.currentFencingToken);
 	} catch (err) {
 		logger.error(
 			'Fence acquisition failed, skipping snapshot',
@@ -538,7 +546,7 @@ async function takeSnapshot(env: Env, room: string, snapshotStateCopy: SnapshotS
 	}
 
 	try {
-		const snapshot = await retrieveSnapshot(env, room, logger);
+		const snapshot = await retrieveSnapshot(env, roomName, logger);
 		const snapShotStartSeqNum = snapshot?.lastSeqNum ? snapshot.lastSeqNum + 1 : 0;
 
 		assert(
@@ -563,7 +571,7 @@ async function takeSnapshot(env: Env, room: string, snapshotStateCopy: SnapshotS
 				'StaleBuffer',
 			);
 
-			await roomLock.forceReleaseLock();
+			await room.forceReleaseLease();
 			snapShotYdoc.destroy();
 			return;
 		}
@@ -609,11 +617,11 @@ async function takeSnapshot(env: Env, room: string, snapshotStateCopy: SnapshotS
 		);
 
 		const newSnapshot = Y.encodeStateAsUpdateV2(snapShotYdoc);
-		await uploadSnapshot(env, room, newSnapshot, snapshotStateCopy.trimSeqNum!, logger);
+		await uploadSnapshot(env, roomName, newSnapshot, snapshotStateCopy.trimSeqNum!, logger);
 
 		snapShotYdoc.destroy();
 
-		await roomLock.releaseLock(snapshotStateCopy.trimSeqNum!, newFencingToken);
+		await room.releaseLease(snapshotStateCopy.trimSeqNum!, newFencingToken);
 
 		logger.info(
 			'Snapshot process completed successfully',
@@ -637,7 +645,7 @@ async function takeSnapshot(env: Env, room: string, snapshotStateCopy: SnapshotS
 		);
 
 		try {
-			await roomLock.forceReleaseLock();
+			await room.forceReleaseLease();
 		} catch (releaseErr) {
 			logger.error(
 				'Failed to release lock after snapshot error',

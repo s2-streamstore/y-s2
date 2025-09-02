@@ -4,6 +4,24 @@ import { fromUint8Array } from 'js-base64';
 import { S2Logger } from './logger';
 import { mergeMessages } from './protocol';
 
+interface Config {
+	maxBacklog: number;
+	batchSize: number;
+	lingerTime: number;
+	leaseDuration: number;
+	backlogBufferAge: number;
+}
+
+export function parseConfig(env: any): Config {
+	return {
+		maxBacklog: env.SNAPSHOT_BACKLOG_SIZE ? parseInt(env.SNAPSHOT_BACKLOG_SIZE, 10) : 400,
+		batchSize: env.S2_BATCH_SIZE ? parseInt(env.S2_BATCH_SIZE, 10) : 8,
+		lingerTime: env.S2_LINGER_TIME ? parseInt(env.S2_LINGER_TIME, 10) : 50,
+		leaseDuration: env.LEASE_DURATION ? parseInt(env.LEASE_DURATION, 10) : 30,
+		backlogBufferAge: env.BACKLOG_BUFFER_AGE ? parseInt(env.BACKLOG_BUFFER_AGE, 10) : 60,
+	};
+}
+
 export function encodeBigEndian64(num: number): string {
 	const buffer = new ArrayBuffer(8);
 	const view = new DataView(buffer);
@@ -54,8 +72,8 @@ export function parseFencingToken(token: string): { id: string; deadline: number
 	return { id, deadline: Number(deadline) };
 }
 
-export function generateDeadlineFencingToken(): string {
-	const newDeadline = Math.floor(Date.now() / 1000 + 60);
+export function generateDeadlineFencingToken(leaseDuration: number): string {
+	const newDeadline = Math.floor(Date.now() / 1000 + leaseDuration);
 	const id = crypto.getRandomValues(new Uint8Array(12));
 	const idBase64 = fromUint8Array(id);
 	return `${idBase64} ${newDeadline}`;
@@ -72,10 +90,10 @@ export class Room {
 		this.s2Basin = s2Basin;
 	}
 
-	async acquireLock(newFencingToken: string, prevFencingToken: string): Promise<AppendAck> {
+	async acquireLease(newFencingToken: string, prevFencingToken: string): Promise<AppendAck> {
 		return await this.s2Client.records.append({
 			stream: this.stream,
-			s2Format: 'base64',
+			s2Format: S2Format.Base64,
 			appendInput: {
 				records: [
 					{
@@ -89,10 +107,10 @@ export class Room {
 		});
 	}
 
-	async forceReleaseLock(): Promise<AppendAck> {
+	async forceReleaseLease(): Promise<AppendAck> {
 		return await this.s2Client.records.append({
 			stream: this.stream,
-			s2Format: 'base64',
+			s2Format: S2Format.Base64,
 			appendInput: {
 				records: [
 					{
@@ -105,9 +123,9 @@ export class Room {
 		});
 	}
 
-	async releaseLock(trimSeqNum: number, prevFencingToken: string): Promise<AppendAck> {
+	async releaseLease(trimSeqNum: number, prevFencingToken: string): Promise<AppendAck> {
 		return await this.s2Client.records.append({
-			s2Format: 'base64',
+			s2Format: S2Format.Base64,
 			stream: this.stream,
 			appendInput: {
 				records: [

@@ -64,20 +64,20 @@ export class S2Logger {
 		this.workerId = config.workerId ?? this.generateWorkerId();
 		this.minLevel = config.minLevel ?? LogLevel.DEBUG;
 
+		if (config.request) {
+			this.cfRay = config.request.headers.get('cf-ray') ?? undefined;
+			this.cfRequestId = config.request.headers.get('cf-request-id') ?? undefined;
+		}
+
 		if (this.logMode !== LogMode.CONSOLE) {
 			this.s2Client = config.s2Client;
 			this.s2Basin = config.s2Basin;
 
 			if (this.logMode === LogMode.S2_SINGLE) {
-				this.streamName = config.streamName ?? `logs/worker-${this.workerId}`;
+				this.streamName = config.streamName ?? (this.cfRay ? `logs/worker-${this.cfRay}` : `logs/worker-${this.workerId}`);
 			} else {
 				this.streamName = config.streamName ?? 'logs/workers-shared';
 			}
-		}
-
-		if (config.request) {
-			this.cfRay = config.request.headers.get('cf-ray') ?? undefined;
-			this.cfRequestId = config.request.headers.get('cf-request-id') ?? undefined;
 		}
 	}
 
@@ -173,7 +173,7 @@ export class S2Logger {
 }
 
 export function createLogger(env: { S2_ACCESS_TOKEN?: string; S2_BASIN?: string; LOG_MODE?: string }, request?: Request): S2Logger {
-	const logMode = (env.LOG_MODE ?? 'S2_SHARED') as LogMode;
+	const logMode = (env.LOG_MODE ?? 'CONSOLE') as LogMode;
 
 	return new S2Logger({
 		s2Client: logMode !== LogMode.CONSOLE ? new S2({ accessToken: env.S2_ACCESS_TOKEN }) : undefined,

@@ -24,7 +24,7 @@
 		"prettier": "^3.0.0",
 		"typescript": "^5.5.2",
 		"vitest": "~3.2.0",
-		"wrangler": "^4.31.0"
+		"wrangler": "^4.33.1"
 	},
 	"dependencies": {
 		"@s2-dev/streamstore": "^0.15.9",
