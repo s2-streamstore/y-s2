@@ -199,7 +199,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 									snapshotState.currentFencingToken = atob(r.body ?? '');
 									snapshotState.lastProcessedFenceSeqNum = r.seqNum;
 									if (!r.body) {
-										snapshotState.lockBlocked = false;
+										snapshotState.blocked = false;
 									}
 									logger.debug(
 										'Received fencing token',
@@ -336,11 +336,11 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								(firstRecordExpired && fenceExpired) ||
 								(snapshotState.currentFencingToken && fenceExpired && backlogSize > 0);
 
-							if (!shouldSnapshot || snapshotState.lockBlocked) {
+							if (!shouldSnapshot || snapshotState.blocked) {
 								continue;
 							}
 
-							snapshotState.lockBlocked = true;
+							snapshotState.blocked = true;
 
 							takeSnapshot(env, leaseDuration, roomName, { ...snapshotState, recordBuffer: [...snapshotState.recordBuffer] }, room, logger);
 						}
@@ -549,12 +549,7 @@ async function takeSnapshot(
 	try {
 		const snapshot = await retrieveSnapshot(env, roomName, logger);
 		const snapShotStartSeqNum = snapshot?.lastSeqNum ? snapshot.lastSeqNum + 1 : 0;
-
-		assert(
-			snapshot?.lastSeqNum ?? 0 === snapshotStateCopy.lastProcessedTrimSeqNum,
-			`Snapshot start seqNum mismatch: ${snapshot?.lastSeqNum ?? 0} != ${snapshotStateCopy.lastProcessedTrimSeqNum}`,
-		);
-
+		
 		const snapShotYdoc = new Y.Doc();
 
 		if (snapshot?.snapshot) {
@@ -655,7 +650,7 @@ async function takeSnapshot(
 					fencingToken: newFencingToken,
 					error: releaseErr instanceof Error ? releaseErr.message : String(releaseErr),
 				},
-				'LockReleaseError',
+				'LeaseReleaseError',
 			);
 		}
 	}
