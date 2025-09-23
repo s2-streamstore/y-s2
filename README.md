@@ -69,3 +69,7 @@ const provider = new WebsocketProvider('wss://your-worker.your-subdomain.workers
 })
 
 ```
+
+### Credits
+
+Portions of this project are derived from [y-redis](https://github.com/yjs/y-redis), licensed under the GNU Affero General Public License v3.0.

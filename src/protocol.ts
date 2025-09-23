@@ -1,3 +1,12 @@
+/*
+ * Portions of this file are derived from y-redis 
+ * Licensed under the GNU Affero General Public License v3.0
+ * See <https://www.gnu.org/licenses/agpl-3.0.html> for license details.
+ *
+ * Modifications to this file are
+ * Licensed under the GNU Affero General Public License v3.0
+ */
+
 import { decoding, encoding } from 'lib0';
 import * as awarenessProtocol from 'y-protocols/awareness';
 import * as Y from 'yjs';
