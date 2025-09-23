@@ -10,7 +10,7 @@
     </a>
   </p>
 
-  <h1>Y.js - S2 Cloudflare Worker<h1>
+  <h1>Yjs - S2 Cloudflare Worker<h1>
 
   <p>    
     <!-- Discord (chat) -->
@@ -22,7 +22,7 @@
 
 ## Overview
 
-Y-S2 is a Cloudflare Worker that provides real-time collaborative document editing using Y.js with S2.dev as the distribution channel and an R2 bucket as the storage provider. It provides scalable WebSocket-based document synchronization where document updates are made durable on an S2 stream and distributed to connected clients and reactively persisted to the R2 bucket. 
+Y-S2 is a Cloudflare Worker that provides real-time collaborative document editing using Yjs with S2.dev as the distribution channel and an R2 bucket as the storage provider. It provides scalable WebSocket-based document synchronization where document updates are made durable on an S2 stream and distributed to connected clients and reactively persisted to the R2 bucket. 
 
 ## Getting Started
 
@@ -57,7 +57,7 @@ npm run dev
 
 ### Client Integration
 
-Connect to your deployed worker using any Y.js WebSocket provider:
+Connect to the deployed worker using the Yjs WebSocket provider:
 
 ```javascript
 import * as Y from 'yjs'
