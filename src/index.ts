@@ -159,14 +159,14 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			s2Basin: env.S2_BASIN,
 		});
 
-		const tailSeqNum = tailResponse.tail.seqNum === 0 ? 0 : tailResponse.tail.seqNum - 1;
+		const tailSeqNum = tailResponse.tail.seqNum;
 
 		logger.info(
 			'Starting catchup from S2',
 			{
 				room,
 				fromSeqNum: catchupSeqNum,
-				toSeqNum: tailSeqNum,
+				tailSeqNum,
 			},
 			'S2Catchup',
 		);
@@ -240,7 +240,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							}
 
 							if (isCatchingUp) {
-								if (r.seqNum >= tailSeqNum) {
+								if (r.seqNum >= tailSeqNum - 1) {
 									isCatchingUp = false;
 									logger.info(
 										'Catchup completed, processing records',
@@ -526,6 +526,8 @@ async function takeSnapshot(
 ): Promise<void> {
 	const newFencingToken = generateDeadlineFencingToken(leaseDuration);
 
+	let leaseAcquired = false;
+
 	try {
 		logger.debug(
 			`Acquiring fence with token ${newFencingToken} - prev token was ${snapshotStateCopy.currentFencingToken}`,
@@ -534,22 +536,11 @@ async function takeSnapshot(
 		);
 
 		await room.acquireLease(newFencingToken, snapshotStateCopy.currentFencingToken);
-	} catch (err) {
-		logger.error(
-			'Fence acquisition failed, skipping snapshot',
-			{
-				room,
-				error: err instanceof Error ? err.message : String(err),
-			},
-			'SnapshotError',
-		);
-		return;
-	}
+		leaseAcquired = true;
 
-	try {
 		const snapshot = await retrieveSnapshot(env, roomName, logger);
 		const snapShotStartSeqNum = snapshot?.lastSeqNum ? snapshot.lastSeqNum + 1 : 0;
-		
+
 		const snapShotYdoc = new Y.Doc();
 
 		if (snapshot?.snapshot) {
@@ -558,7 +549,7 @@ async function takeSnapshot(
 
 		if (snapshotStateCopy.recordBuffer.length > 0 && snapshotStateCopy.recordBuffer[0].seqNum < snapShotStartSeqNum) {
 			logger.warn(
-				'Record buffer is stale, releasing lock and aborting snapshot',
+				'Record buffer is stale, releasing lease and aborting snapshot',
 				{
 					room,
 					firstRecordSeqNum: snapshotStateCopy.recordBuffer[0].seqNum,
@@ -567,7 +558,6 @@ async function takeSnapshot(
 				'StaleBuffer',
 			);
 
-			await room.forceReleaseLease(newFencingToken);
 			snapShotYdoc.destroy();
 			return;
 		}
@@ -630,28 +620,41 @@ async function takeSnapshot(
 			'SnapshotSuccess',
 		);
 	} catch (err) {
-		logger.error(
-			'Snapshot process failed after acquiring lock',
-			{
-				room,
-				fencingToken: newFencingToken,
-				error: err instanceof Error ? err.message : String(err),
-			},
-			'SnapshotProcessError',
-		);
-
-		try {
-			await room.forceReleaseLease(newFencingToken);
-		} catch (releaseErr) {
+		if (!leaseAcquired) {
 			logger.error(
-				'Failed to release lock after snapshot error',
+				'Fence acquisition failed, skipping snapshot',
+				{
+					room,
+					error: err instanceof Error ? err.message : String(err),
+				},
+				'SnapshotError',
+			);
+		} else {
+			logger.error(
+				'Snapshot process failed after acquiring lease',
 				{
 					room,
 					fencingToken: newFencingToken,
-					error: releaseErr instanceof Error ? releaseErr.message : String(releaseErr),
+					error: err instanceof Error ? err.message : String(err),
 				},
-				'LeaseReleaseError',
+				'SnapshotProcessError',
 			);
+		}
+	} finally {
+		if (leaseAcquired) {
+			try {
+				await room.forceReleaseLease(newFencingToken);
+			} catch (releaseErr) {
+				logger.error(
+					'Failed to release lease',
+					{
+						room,
+						fencingToken: newFencingToken,
+						error: releaseErr instanceof Error ? releaseErr.message : String(releaseErr),
+					},
+					'LeaseReleaseError',
+				);
+			}
 		}
 	}
 }
