@@ -567,7 +567,7 @@ async function takeSnapshot(
 				'StaleBuffer',
 			);
 
-			await room.forceReleaseLease();
+			await room.forceReleaseLease(newFencingToken);
 			snapShotYdoc.destroy();
 			return;
 		}
@@ -641,7 +641,7 @@ async function takeSnapshot(
 		);
 
 		try {
-			await room.forceReleaseLease();
+			await room.forceReleaseLease(newFencingToken);
 		} catch (releaseErr) {
 			logger.error(
 				'Failed to release lock after snapshot error',

@@ -107,7 +107,7 @@ export class Room {
 		});
 	}
 
-	async forceReleaseLease(): Promise<AppendAck> {
+	async forceReleaseLease(currentFencingToken: string): Promise<AppendAck> {
 		return await this.s2Client.records.append({
 			stream: this.stream,
 			s2Format: S2Format.Base64,
@@ -118,6 +118,7 @@ export class Room {
 						headers: [[btoa(''), btoa('fence')]],
 					},
 				],
+				fencingToken: currentFencingToken,
 			},
 			s2Basin: this.s2Basin,
 		});
