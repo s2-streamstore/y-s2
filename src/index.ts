@@ -173,6 +173,18 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
 		const messageBatcher = new MessageBatcher(s2Client, streamName, env.S2_BASIN, logger, roomName, batchSize, lingerTime);
 
+		const sendSyncMessages = (): void => {
+			server.send(encodeSyncStep1(Y.encodeStateVector(ydoc)));
+			server.send(encodeSyncStep2(Y.encodeStateAsUpdate(ydoc)));
+
+			if (awareness.states.size > 0) {
+				server.send(encodeAwarenessUpdate(awareness, array.from(awareness.states.keys())));
+			}
+
+			ydoc.destroy();
+			awareness.destroy();
+		};
+
 		(async () => {
 			try {
 				logger.info('Starting S2 event stream', { room, catchupSeqNum }, 'S2EventStream');
@@ -201,15 +213,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 						'SnapshotSend',
 					);
 
-					server.send(encodeSyncStep1(Y.encodeStateVector(ydoc)));
-					server.send(encodeSyncStep2(Y.encodeStateAsUpdate(ydoc)));
-
-					if (awareness.states.size > 0) {
-						server.send(encodeAwarenessUpdate(awareness, array.from(awareness.states.keys())));
-					}
-
-					ydoc.destroy();
-					awareness.destroy();
+					sendSyncMessages();
 				}
 
 				for await (const event of events as EventStream<ReadEvent>) {
@@ -321,15 +325,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 										'CatchupComplete',
 									);
 
-									server.send(encodeSyncStep1(Y.encodeStateVector(ydoc)));
-									server.send(encodeSyncStep2(Y.encodeStateAsUpdate(ydoc)));
-
-									if (awareness.states.size > 0) {
-										server.send(encodeAwarenessUpdate(awareness, array.from(awareness.states.keys())));
-									}
-
-									ydoc.destroy();
-									awareness.destroy();
+									sendSyncMessages();
 								}
 								continue;
 							}
