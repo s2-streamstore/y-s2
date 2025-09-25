@@ -267,7 +267,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							}
 
 							if (isCatchingUp) {
-								if (r.seqNum >= tailSeqNum - 1) {
+								if (r.seqNum + 1 >= tailSeqNum) {
 									isCatchingUp = false;
 									logger.info(
 										'Catchup completed, processing records',
