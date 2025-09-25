@@ -10,9 +10,15 @@
     </a>
   </p>
 
-  <h1>Yjs - S2 Cloudflare Worker<h1>
+  <h1>Yjs - S2 Cloudflare Worker</h1>
 
-  <p>    
+  <p>
+    <a href="https://s2.dev/demos/y-s2">
+      <img src="https://img.shields.io/badge/_Try_Demo-Live-brightgreen?style=for-the-badge" alt="Try Demo">
+    </a>
+  </p>
+
+  <p>
     <!-- Discord (chat) -->
     <a href="https://discord.gg/vTCs7kMkAf"><img src="https://img.shields.io/discord/1209937852528599092?logo=discord" /></a>
     <!-- LICENSE -->
