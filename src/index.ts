@@ -550,130 +550,76 @@ async function takeSnapshot(
 	const newFencingToken = generateDeadlineFencingToken(leaseDuration);
 
 	try {
-		logger.debug(
-			`Acquiring fence with token ${newFencingToken} - prev token was ${snapshotStateCopy.currentFencingToken}`,
-			{ room },
-			'FenceAcquisition',
-		);
-
 		await room.acquireLease(newFencingToken, snapshotStateCopy.currentFencingToken);
 	} catch (err) {
-		logger.error(
-			'Fence acquisition failed, skipping snapshot',
-			{
-				room,
-				error: err instanceof Error ? err.message : String(err),
-			},
-			'SnapshotError',
-		);
+		logger.error('Lease acquisition failed, skipping snapshot', { roomName, error: err }, 'LeaseAcquisitionError');
 		return;
 	}
 
 	try {
 		const snapshot = await retrieveSnapshot(env, roomName, logger);
-		const snapShotStartSeqNum = snapshot?.lastSeqNum ? snapshot.lastSeqNum + 1 : 0;
+		const startSeqNum = (snapshot?.lastSeqNum ?? -1) + 1;
 
-		const snapShotYdoc = new Y.Doc();
-
+		const ydoc = new Y.Doc();
 		if (snapshot?.snapshot) {
-			Y.applyUpdateV2(snapShotYdoc, snapshot.snapshot);
+			Y.applyUpdateV2(ydoc, snapshot.snapshot);
 		}
 
-		if (snapshotStateCopy.recordBuffer.length > 0 && snapshotStateCopy.recordBuffer[0].seqNum < snapShotStartSeqNum) {
-			logger.warn(
-				'Record buffer is stale, releasing lease and aborting snapshot',
-				{
-					room,
-					firstRecordSeqNum: snapshotStateCopy.recordBuffer[0].seqNum,
-					snapShotStartSeqNum,
-				},
-				'StaleBuffer',
-			);
-
-			snapShotYdoc.destroy();
+		const { recordBuffer } = snapshotStateCopy;
+		if (recordBuffer.length > 0 && recordBuffer[0].seqNum < startSeqNum) {
+			logger.warn('Record buffer is stale, aborting snapshot', {
+				roomName,
+				firstRecordSeqNum: recordBuffer[0].seqNum,
+				startSeqNum,
+			});
+			ydoc.destroy();
 			return;
 		}
 
-		snapShotYdoc.transact(() => {
-			for (const r of snapshotStateCopy.recordBuffer) {
-				if (!r.body) continue;
+		ydoc.transact(() => {
+			for (const record of recordBuffer) {
+				if (!record.body) continue;
 
 				try {
-					const recordBytes = toUint8Array(r.body);
-					const decoder = decoding.createDecoder(recordBytes);
+					const bytes = toUint8Array(record.body);
+					const decoder = decoding.createDecoder(bytes);
 					const messageType = decoding.readUint8(decoder);
 
 					if (messageType === messageSync) {
 						const syncType = decoding.readUint8(decoder);
 						if (syncType === messageSyncUpdate || syncType === messageSyncStep2) {
 							const update = decoding.readVarUint8Array(decoder);
-							Y.applyUpdate(snapShotYdoc, update);
+							Y.applyUpdate(ydoc, update);
 						}
 					}
 				} catch (err) {
-					logger.error(
-						'Failed to apply record during snapshot creation',
-						{
-							room,
-							recordSeqNum: r.seqNum,
-							error: err instanceof Error ? err.message : String(err),
-						},
-						'SnapshotRecordError',
-					);
+					logger.error('Failed to apply record during snapshot', {
+						roomName,
+						recordSeqNum: record.seqNum,
+						error: err,
+					});
 				}
 			}
 		});
 
-		logger.info(
-			'Snapshot created using in-memory records',
-			{
-				room,
-				lastSeqNum: snapshotStateCopy.trimSeqNum,
-				totalBufferedRecords: snapshotStateCopy.recordBuffer.length,
-			},
-			'SnapshotUpload',
-		);
-
-		const newSnapshot = Y.encodeStateAsUpdateV2(snapShotYdoc);
+		const newSnapshot = Y.encodeStateAsUpdateV2(ydoc);
 		await uploadSnapshot(env, roomName, newSnapshot, snapshotStateCopy.trimSeqNum!, logger);
-
-		snapShotYdoc.destroy();
+		ydoc.destroy();
 
 		await room.releaseLease(snapshotStateCopy.trimSeqNum!, newFencingToken);
 
-		logger.info(
-			'Snapshot process completed successfully',
-			{
-				room,
-				fencingToken: newFencingToken,
-				recordsProcessed: snapshotStateCopy.recordBuffer.length,
-				finalSeqNum: snapshotStateCopy.trimSeqNum,
-			},
-			'SnapshotSuccess',
-		);
+		logger.info('Snapshot completed successfully', {
+			roomName,
+			recordsProcessed: recordBuffer.length,
+			finalSeqNum: snapshotStateCopy.trimSeqNum,
+		});
 	} catch (err) {
-		logger.error(
-			'Snapshot process failed after acquiring lease',
-			{
-				room,
-				fencingToken: newFencingToken,
-				error: err instanceof Error ? err.message : String(err),
-			},
-			'SnapshotProcessError',
-		);
+		logger.error('Snapshot failed after acquiring lease', { roomName, error: err });
 	} finally {
 		try {
 			await room.forceReleaseLease(newFencingToken);
-		} catch (releaseErr) {
-			logger.error(
-				'Failed to release lease',
-				{
-					room,
-					fencingToken: newFencingToken,
-					error: releaseErr instanceof Error ? releaseErr.message : String(releaseErr),
-				},
-				'LeaseReleaseError',
-			);
+		} catch (err) {
+			logger.error('Failed to release lease', { roomName, error: err });
 		}
 	}
 }
