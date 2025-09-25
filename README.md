@@ -22,7 +22,7 @@
     <!-- Discord (chat) -->
     <a href="https://discord.gg/vTCs7kMkAf"><img src="https://img.shields.io/discord/1209937852528599092?logo=discord" /></a>
     <!-- LICENSE -->
-    <a href="./LICENSE"><img src="https://img.shields.io/github/license/s2-streamstore/resumable-stream" /></a>
+    <a href="./LICENSE"><img src="https://img.shields.io/github/license/s2-streamstore/y-s2" /></a>
   </p>
 </div>
 
