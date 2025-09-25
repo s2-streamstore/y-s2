@@ -189,6 +189,29 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
 				let isCatchingUp = catchupSeqNum < tailSeqNum;
 
+				if (!isCatchingUp) {
+					logger.info(
+						'Already caught up, sending existing snapshot',
+						{
+							room,
+							catchupSeqNum,
+							tailSeqNum,
+							recordCount: snapshotState.recordBuffer.length,
+						},
+						'SnapshotSend',
+					);
+
+					server.send(encodeSyncStep1(Y.encodeStateVector(ydoc)));
+					server.send(encodeSyncStep2(Y.encodeStateAsUpdate(ydoc)));
+
+					if (awareness.states.size > 0) {
+						server.send(encodeAwarenessUpdate(awareness, array.from(awareness.states.keys())));
+					}
+
+					ydoc.destroy();
+					awareness.destroy();
+				}
+
 				for await (const event of events as EventStream<ReadEvent>) {
 					if (event.event === 'batch' && event.data?.records) {
 						for (const r of event.data.records) {
@@ -314,7 +337,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							const recordBytes = toUint8Array(r.body);
 							server.send(recordBytes);
 
-							const fenceExpired = (() => {
+							const leaseExpired = (() => {
 								if (!snapshotState.currentFencingToken) return true;
 								try {
 									const { deadline } = parseFencingToken(snapshotState.currentFencingToken);
@@ -332,9 +355,9 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								snapshotState.trimSeqNum !== null ? snapshotState.trimSeqNum + 1 - snapshotState.lastProcessedTrimSeqNum : 0;
 
 							const shouldSnapshot =
-								(backlogSize >= maxBacklog && fenceExpired) ||
-								(firstRecordExpired && fenceExpired) ||
-								(snapshotState.currentFencingToken && fenceExpired && backlogSize > 0);
+								(backlogSize >= maxBacklog && leaseExpired) ||
+								(firstRecordExpired && leaseExpired) ||
+								(snapshotState.currentFencingToken && leaseExpired && backlogSize > 0);
 
 							if (!shouldSnapshot || snapshotState.blocked) {
 								continue;
@@ -526,8 +549,6 @@ async function takeSnapshot(
 ): Promise<void> {
 	const newFencingToken = generateDeadlineFencingToken(leaseDuration);
 
-	let leaseAcquired = false;
-
 	try {
 		logger.debug(
 			`Acquiring fence with token ${newFencingToken} - prev token was ${snapshotStateCopy.currentFencingToken}`,
@@ -536,8 +557,19 @@ async function takeSnapshot(
 		);
 
 		await room.acquireLease(newFencingToken, snapshotStateCopy.currentFencingToken);
-		leaseAcquired = true;
+	} catch (err) {
+		logger.error(
+			'Fence acquisition failed, skipping snapshot',
+			{
+				room,
+				error: err instanceof Error ? err.message : String(err),
+			},
+			'SnapshotError',
+		);
+		return;
+	}
 
+	try {
 		const snapshot = await retrieveSnapshot(env, roomName, logger);
 		const snapShotStartSeqNum = snapshot?.lastSeqNum ? snapshot.lastSeqNum + 1 : 0;
 
@@ -620,41 +652,28 @@ async function takeSnapshot(
 			'SnapshotSuccess',
 		);
 	} catch (err) {
-		if (!leaseAcquired) {
+		logger.error(
+			'Snapshot process failed after acquiring lease',
+			{
+				room,
+				fencingToken: newFencingToken,
+				error: err instanceof Error ? err.message : String(err),
+			},
+			'SnapshotProcessError',
+		);
+	} finally {
+		try {
+			await room.forceReleaseLease(newFencingToken);
+		} catch (releaseErr) {
 			logger.error(
-				'Fence acquisition failed, skipping snapshot',
-				{
-					room,
-					error: err instanceof Error ? err.message : String(err),
-				},
-				'SnapshotError',
-			);
-		} else {
-			logger.error(
-				'Snapshot process failed after acquiring lease',
+				'Failed to release lease',
 				{
 					room,
 					fencingToken: newFencingToken,
-					error: err instanceof Error ? err.message : String(err),
+					error: releaseErr instanceof Error ? releaseErr.message : String(releaseErr),
 				},
-				'SnapshotProcessError',
+				'LeaseReleaseError',
 			);
-		}
-	} finally {
-		if (leaseAcquired) {
-			try {
-				await room.forceReleaseLease(newFencingToken);
-			} catch (releaseErr) {
-				logger.error(
-					'Failed to release lease',
-					{
-						room,
-						fencingToken: newFencingToken,
-						error: releaseErr instanceof Error ? releaseErr.message : String(releaseErr),
-					},
-					'LeaseReleaseError',
-				);
-			}
 		}
 	}
 }
