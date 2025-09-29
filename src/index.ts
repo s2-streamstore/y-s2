@@ -19,7 +19,7 @@ import {
 	messageSyncStep2,
 	messageSyncUpdate,
 } from './protocol.js';
-import { retrieveSnapshot, uploadSnapshot } from './snapshot.js';
+import { retrieveSnapshot, uploadSnapshot, getSnapshotETag } from './snapshot.js';
 import {
 	decodeBigEndian64AsNumber,
 	generateDeadlineFencingToken,
@@ -160,7 +160,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			const newSnapshotState = createSnapshotState();
 
 			const lastSeqNum = checkpoint?.lastSeqNum ?? 0;
-			newSnapshotState.lastProcessedTrimSeqNum = lastSeqNum;
+			newSnapshotState.lastProcessedTrimSeqNum = lastSeqNum;			
 			const catchupSeqNum = checkpoint ? lastSeqNum + 1 : 0;
 
 			return { catchupSeqNum, snapshotState: newSnapshotState };
@@ -626,6 +626,7 @@ async function takeSnapshot(
 	logger: S2Logger,
 ): Promise<void> {
 	const newFencingToken = generateDeadlineFencingToken(leaseDuration);
+	const currentETag = await getSnapshotETag(env, roomName, logger);	
 
 	try {
 		await room.acquireLease(newFencingToken, snapshotStateCopy.currentFencingToken);
@@ -681,7 +682,7 @@ async function takeSnapshot(
 		});
 
 		const newSnapshot = Y.encodeStateAsUpdateV2(ydoc);
-		await uploadSnapshot(env, roomName, newSnapshot, snapshotStateCopy.trimSeqNum!, logger);
+		await uploadSnapshot(env, roomName, newSnapshot, snapshotStateCopy.trimSeqNum!, currentETag, logger);
 		ydoc.destroy();
 
 		await room.releaseLease(snapshotStateCopy.trimSeqNum!, newFencingToken);
