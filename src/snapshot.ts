@@ -38,12 +38,16 @@ export async function uploadSnapshot(
 		await env.R2_BUCKET.put(key, ydocUpdate, putOptions);
 		logger.info('Snapshot uploaded successfully', { room, key, lastSeqNum, expectedETag }, 'SnapshotUpload');
 	} catch (error) {
-		logger.warn('Snapshot upload failed', {
-			room,
-			key,
-			expectedETag,
-			error: error instanceof Error ? error.message : String(error),
-		}, 'SnapshotUpload');
+		logger.warn(
+			'Snapshot upload failed',
+			{
+				room,
+				key,
+				expectedETag,
+				error: error instanceof Error ? error.message : String(error),
+			},
+			'SnapshotUpload',
+		);
 
 		throw error;
 	}
@@ -77,11 +81,7 @@ export async function retrieveSnapshot(
 	};
 }
 
-export async function getSnapshotETag(
-	env: Env,
-	room: string,
-	logger: S2Logger,
-): Promise<string | null> {
+export async function getSnapshotETag(env: Env, room: string, logger: S2Logger): Promise<string | null> {
 	if (!env.R2_BUCKET) {
 		logger.warn('No R2 bucket configured, cannot get ETag', { room }, 'SnapshotETag');
 		return null;

@@ -1,5 +1,5 @@
 /*
- * Portions of this file are derived from y-redis 
+ * Portions of this file are derived from y-redis
  * Licensed under the GNU Affero General Public License v3.0
  * See <https://www.gnu.org/licenses/agpl-3.0.html> for license details.
  *

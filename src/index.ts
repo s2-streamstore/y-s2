@@ -160,7 +160,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			const newSnapshotState = createSnapshotState();
 
 			const lastSeqNum = checkpoint?.lastSeqNum ?? 0;
-			newSnapshotState.lastProcessedTrimSeqNum = lastSeqNum;			
+			newSnapshotState.lastProcessedTrimSeqNum = lastSeqNum;
 			const catchupSeqNum = checkpoint ? lastSeqNum + 1 : 0;
 
 			return { catchupSeqNum, snapshotState: newSnapshotState };
@@ -236,12 +236,16 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 						);
 
 						if (currentCatchupSeqNum < err.tail.seqNum) {
-							logger.info('Stale state from R2 - restarting from fresh snapshot', {
-								room,
-								requestedSeqNum: currentCatchupSeqNum,
-								tailSeqNum: err.tail.seqNum,
-								attempt: attempts,
-							}, 'RestartFromSnapshot');
+							logger.info(
+								'Stale state from R2 - restarting from fresh snapshot',
+								{
+									room,
+									requestedSeqNum: currentCatchupSeqNum,
+									tailSeqNum: err.tail.seqNum,
+									attempt: attempts,
+								},
+								'RestartFromSnapshot',
+							);
 
 							const newState = await initializeFromSnapshot();
 							currentCatchupSeqNum = newState.catchupSeqNum;
@@ -260,12 +264,16 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							throw err;
 						}
 					} else {
-						logger.error('S2 stream read error', {
-							error: err instanceof Error ? err.message : String(err),
-							room,
-							attempt: attempts
-						}, 'S2StreamError');
-						throw err; 
+						logger.error(
+							'S2 stream read error',
+							{
+								error: err instanceof Error ? err.message : String(err),
+								room,
+								attempt: attempts,
+							},
+							'S2StreamError',
+						);
+						throw err;
 					}
 				}
 			}
@@ -273,7 +281,11 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			logger.error('Max retry attempts reached for stream reading', { room, maxAttempts }, 'MaxRetriesReached');
 		};
 
-		const processEventStream = async (events: EventStream<ReadEvent>, currentCatchupSeqNum: number, currentSnapshotState: SnapshotState): Promise<void> => {
+		const processEventStream = async (
+			events: EventStream<ReadEvent>,
+			currentCatchupSeqNum: number,
+			currentSnapshotState: SnapshotState,
+		): Promise<void> => {
 			let isCatchingUp = currentCatchupSeqNum < tailSeqNum;
 
 			if (!isCatchingUp) {
@@ -416,7 +428,11 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								const { deadline } = parseFencingToken(currentSnapshotState.currentFencingToken);
 								return Date.now() > deadline * 1000;
 							} catch {
-								logger.error('Invalid fencing token format', { room, token: currentSnapshotState.currentFencingToken }, 'FencingTokenError');
+								logger.error(
+									'Invalid fencing token format',
+									{ room, token: currentSnapshotState.currentFencingToken },
+									'FencingTokenError',
+								);
 								return false;
 							}
 						})();
@@ -425,7 +441,9 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							currentSnapshotState.firstRecordAge !== null && Date.now() - currentSnapshotState.firstRecordAge > backlogBufferAge;
 
 						const backlogSize =
-							currentSnapshotState.trimSeqNum !== null ? currentSnapshotState.trimSeqNum + 1 - currentSnapshotState.lastProcessedTrimSeqNum : 0;
+							currentSnapshotState.trimSeqNum !== null
+								? currentSnapshotState.trimSeqNum + 1 - currentSnapshotState.lastProcessedTrimSeqNum
+								: 0;
 
 						const shouldSnapshot =
 							(backlogSize >= maxBacklog && leaseExpired) ||
@@ -438,7 +456,14 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
 						currentSnapshotState.blocked = true;
 
-						takeSnapshot(env, leaseDuration, roomName, { ...currentSnapshotState, recordBuffer: [...currentSnapshotState.recordBuffer] }, room, logger);
+						takeSnapshot(
+							env,
+							leaseDuration,
+							roomName,
+							{ ...currentSnapshotState, recordBuffer: [...currentSnapshotState.recordBuffer] },
+							room,
+							logger,
+						);
 					}
 				}
 			}
@@ -448,7 +473,11 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			try {
 				await readStreamWithRetry();
 			} catch (err) {
-				logger.error('Failed to read stream after all retries', { error: err instanceof Error ? err.message : String(err), room }, 'StreamReadFailure');
+				logger.error(
+					'Failed to read stream after all retries',
+					{ error: err instanceof Error ? err.message : String(err), room },
+					'StreamReadFailure',
+				);
 			}
 		})();
 
@@ -626,7 +655,7 @@ async function takeSnapshot(
 	logger: S2Logger,
 ): Promise<void> {
 	const newFencingToken = generateDeadlineFencingToken(leaseDuration);
-	const currentETag = await getSnapshotETag(env, roomName, logger);	
+	const currentETag = await getSnapshotETag(env, roomName, logger);
 
 	try {
 		await room.acquireLease(newFencingToken, snapshotStateCopy.currentFencingToken);
