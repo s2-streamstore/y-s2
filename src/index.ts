@@ -1,4 +1,4 @@
-import { S2, RangeNotSatisfiableError, type SequencedRecord } from '@s2-dev/streamstore';
+import { S2, RangeNotSatisfiableError, AppendRecord, type SequencedRecord } from '@s2-dev/streamstore';
 import * as Y from 'yjs';
 import * as decoding from 'lib0/decoding';
 import * as awarenessProtocol from 'y-protocols/awareness';
@@ -21,7 +21,6 @@ import {
 	generateDeadlineFencingToken,
 	isFenceCommand,
 	isTrimCommand,
-	MessageBatcher,
 	parseConfig,
 	parseFencingToken,
 	Room,
@@ -179,7 +178,11 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			'S2Catchup',
 		);
 
-		const messageBatcher = new MessageBatcher(s2Client, streamName, env.S2_BASIN, logger, roomName, batchSize, lingerTime);
+		const appendSession = await stream.appendSession();
+		const batcher = appendSession.makeBatcher({
+			maxBatchSize: batchSize,
+			lingerDuration: lingerTime,
+		});
 
 		const sendSyncMessages = (): void => {
 			server.send(encodeSyncStep1(Y.encodeStateVector(ydoc)));
@@ -300,7 +303,6 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
 				if (isFenceCommand(r)) {
 					if (r.seq_num > currentSnapshotState.lastProcessedFenceSeqNum) {
-						// body is now Uint8Array, convert to string
 						currentSnapshotState.currentFencingToken = r.body ? new TextDecoder().decode(r.body) : '';
 						currentSnapshotState.lastProcessedFenceSeqNum = r.seq_num;
 						if (!r.body) {
@@ -323,7 +325,6 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				}
 
 				if (isTrimCommand(r)) {
-					// Convert Uint8Array to base64 for decodeBigEndian64AsNumber
 					const base64Body = btoa(String.fromCharCode(...r.body));
 					const trimSeqNum = decodeBigEndian64AsNumber(base64Body);
 					if (trimSeqNum > currentSnapshotState.lastProcessedTrimSeqNum) {
@@ -369,8 +370,9 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 						ydoc.transact(() => {
 							for (const record of currentSnapshotState.recordBuffer) {
 								try {
-									// body is already Uint8Array in the new SDK
-									if (!record.body) {continue;}
+									if (!record.body) {
+										continue;
+									}
 									const recordBytes: Uint8Array = record.body;
 
 									const decoder = decoding.createDecoder(recordBytes);
@@ -414,21 +416,18 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					continue;
 				}
 
-				// body is already Uint8Array in the new SDK
 				const recordBytes = r.body;
 				server.send(recordBytes);
 
 				const leaseExpired = (() => {
-					if (!currentSnapshotState.currentFencingToken) {return true;}
+					if (!currentSnapshotState.currentFencingToken) {
+						return true;
+					}
 					try {
 						const { deadline } = parseFencingToken(currentSnapshotState.currentFencingToken);
 						return Date.now() > deadline * 1000;
 					} catch {
-						logger.error(
-							'Invalid fencing token format',
-							{ room, token: currentSnapshotState.currentFencingToken },
-							'FencingTokenError',
-						);
+						logger.error('Invalid fencing token format', { room, token: currentSnapshotState.currentFencingToken }, 'FencingTokenError');
 						return false;
 					}
 				})();
@@ -437,9 +436,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					currentSnapshotState.firstRecordAge !== null && Date.now() - currentSnapshotState.firstRecordAge > backlogBufferAge;
 
 				const backlogSize =
-					currentSnapshotState.trimSeqNum !== null
-						? currentSnapshotState.trimSeqNum + 1 - currentSnapshotState.lastProcessedTrimSeqNum
-						: 0;
+					currentSnapshotState.trimSeqNum !== null ? currentSnapshotState.trimSeqNum + 1 - currentSnapshotState.lastProcessedTrimSeqNum : 0;
 
 				const shouldSnapshot =
 					(backlogSize >= maxBacklog && leaseExpired) ||
@@ -525,7 +522,16 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 						return;
 					}
 				}
-				messageBatcher.addMessage(buffer);
+				batcher.submit(AppendRecord.make(buffer)).catch((err: Error) => {
+					logger.error(
+						'Failed to submit message to batcher',
+						{
+							room,
+							error: err.message,
+						},
+						'BatcherSubmitError',
+					);
+				});
 			} catch (err) {
 				logger.error(
 					'Message processing error',
@@ -551,7 +557,17 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			if (userState.awarenessId !== null) {
 				try {
 					const disconnectMessage = encodeAwarenessUserDisconnected(userState.awarenessId, userState.awarenessLastClock);
-					messageBatcher.addMessage(disconnectMessage);
+					batcher.submit(AppendRecord.make(disconnectMessage)).catch((err: Error) => {
+						logger.error(
+							'Failed to submit disconnect message',
+							{
+								room,
+								userId: userState.awarenessId,
+								error: err.message,
+							},
+							'DisconnectSubmitError',
+						);
+					});
 					logger.info(
 						'User disconnect message queued',
 						{
@@ -573,7 +589,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					);
 				}
 			}
-			await messageBatcher.flush();
+			batcher.flush();
 		});
 
 		return new Response(null, {
@@ -680,10 +696,11 @@ async function takeSnapshot(
 
 		ydoc.transact(() => {
 			for (const record of recordBuffer) {
-				if (!record.body) {continue;}
+				if (!record.body) {
+					continue;
+				}
 
 				try {
-					// body is already Uint8Array
 					const bytes: Uint8Array = record.body;
 					const decoder = decoding.createDecoder(bytes);
 					const messageType = decoding.readUint8(decoder);

@@ -122,7 +122,7 @@ export class S2Logger {
 			return;
 		}
 
-		try {			
+		try {
 			const basin = this.s2Basin;
 			const stream = this.s2Client.basin(basin).stream(this.streamName);
 			await stream.append(AppendRecord.make(JSON.stringify(entry)));
@@ -132,25 +132,33 @@ export class S2Logger {
 	}
 
 	debug(message: string, data?: any, source?: string): void {
-		if (!this.shouldLog(LogLevel.DEBUG)) {return;}
+		if (!this.shouldLog(LogLevel.DEBUG)) {
+			return;
+		}
 		const entry = this.createLogEntry(LogLevel.DEBUG, message, data, source);
 		this.logEntry(entry);
 	}
 
 	info(message: string, data?: any, source?: string): void {
-		if (!this.shouldLog(LogLevel.INFO)) {return;}
+		if (!this.shouldLog(LogLevel.INFO)) {
+			return;
+		}
 		const entry = this.createLogEntry(LogLevel.INFO, message, data, source);
 		this.logEntry(entry);
 	}
 
 	warn(message: string, data?: any, source?: string): void {
-		if (!this.shouldLog(LogLevel.WARN)) {return;}
+		if (!this.shouldLog(LogLevel.WARN)) {
+			return;
+		}
 		const entry = this.createLogEntry(LogLevel.WARN, message, data, source);
 		this.logEntry(entry);
 	}
 
 	error(message: string, data?: any, source?: string): void {
-		if (!this.shouldLog(LogLevel.ERROR)) {return;}
+		if (!this.shouldLog(LogLevel.ERROR)) {
+			return;
+		}
 		const entry = this.createLogEntry(LogLevel.ERROR, message, data, source);
 		this.logEntry(entry);
 	}

@@ -1,7 +1,5 @@
 import { S2, SequencedRecord, AppendRecord } from '@s2-dev/streamstore';
 import { fromUint8Array } from 'js-base64';
-import { S2Logger } from './logger';
-import { mergeMessages } from './protocol';
 
 interface Config {
 	maxBacklog: number;
@@ -59,25 +57,22 @@ function compareHeaderValue(headerValue: string | Uint8Array, expected: string):
 	return decoded === expected;
 }
 
-export function isCommandType<Format extends 'string' | 'bytes' = 'string'>(
-	record: SequencedRecord<Format>,
-	type: CommandType,
-): boolean {
-	if (!record.headers || record.headers.length !== 1) {return false;}
+export function isCommandType<Format extends 'string' | 'bytes' = 'string'>(record: SequencedRecord<Format>, type: CommandType): boolean {
+	if (!record.headers || record.headers.length !== 1) {
+		return false;
+	}
 	const header = record.headers[0];
-	if (!header) {return false;}
+	if (!header) {
+		return false;
+	}
 	return compareHeaderValue(header[0] as any, '') && compareHeaderValue(header[1] as any, type);
 }
 
-export function isFenceCommand<Format extends 'string' | 'bytes' = 'string'>(
-	record: SequencedRecord<Format>,
-): boolean {
+export function isFenceCommand<Format extends 'string' | 'bytes' = 'string'>(record: SequencedRecord<Format>): boolean {
 	return isCommandType(record, CommandType.FENCE);
 }
 
-export function isTrimCommand<Format extends 'string' | 'bytes' = 'string'>(
-	record: SequencedRecord<Format>,
-): boolean {
+export function isTrimCommand<Format extends 'string' | 'bytes' = 'string'>(record: SequencedRecord<Format>): boolean {
 	return isCommandType(record, CommandType.TRIM);
 }
 
@@ -109,94 +104,18 @@ export class Room {
 
 	async acquireLease(newFencingToken: string, prevFencingToken: string) {
 		const stream = this.s2Client.basin(this.s2Basin).stream(this.streamName);
-		return await stream.append(
-			AppendRecord.make(newFencingToken, [['', 'fence']]),
-			{ fencing_token: prevFencingToken },
-		);
+		return await stream.append(AppendRecord.fence(newFencingToken, [['', 'fence']]), { fencing_token: prevFencingToken });
 	}
 
 	async forceReleaseLease(currentFencingToken: string) {
 		const stream = this.s2Client.basin(this.s2Basin).stream(this.streamName);
-		return await stream.append(
-			AppendRecord.make('', [['', 'fence']]),
-			{ fencing_token: currentFencingToken },
-		);
+		return await stream.append(AppendRecord.make('', [['', 'fence']]), { fencing_token: currentFencingToken });
 	}
 
 	async releaseLease(trimSeqNum: number, prevFencingToken: string) {
 		const stream = this.s2Client.basin(this.s2Basin).stream(this.streamName);
-		return await stream.append(
-			[
-				AppendRecord.make('', [['', 'fence']]),
-				AppendRecord.make(encodeBigEndian64(trimSeqNum), [['', 'trim']]),
-			],
-			{ fencing_token: prevFencingToken },
-		);
-	}
-}
-
-export class MessageBatcher {
-	private messageBatch: Uint8Array[] = [];
-	private batchTimeout: NodeJS.Timeout | null = null;
-
-	constructor(
-		private readonly s2Client: S2,
-		private readonly streamName: string,
-		private readonly s2Basin: string,
-		private readonly logger: S2Logger,
-		private readonly room: string,
-		private readonly batchSize: number,
-		private readonly lingerTime: number,
-	) {}
-
-	addMessage(message: Uint8Array): void {
-		this.messageBatch.push(message);
-
-		if (this.messageBatch.length >= this.batchSize) {
-			this.flush();
-		} else {
-			this.resetTimeout();
-		}
-	}
-
-	async flush(): Promise<void> {
-		if (this.messageBatch.length === 0) {return;}
-
-		const batch = [...this.messageBatch];
-		this.clearBatch();
-		this.clearTimeout();
-
-		try {
-			const messagesToSend = mergeMessages(batch);
-			const stream = this.s2Client.basin(this.s2Basin).stream(this.streamName);
-			const records = messagesToSend.map((msg) => AppendRecord.make(msg));
-			await stream.append(records);
-		} catch (err) {
-			this.logger.error(
-				'Failed to append batch to S2',
-				{
-					room: this.room,
-					streamName: this.streamName,
-					error: err instanceof Error ? err.message : String(err),
-				},
-				'S2AppendError',
-			);
-		}
-	}
-
-	private clearBatch(): void {
-		this.messageBatch = [];
-	}
-
-	private clearTimeout(): void {
-		if (this.batchTimeout) {
-			clearTimeout(this.batchTimeout);
-			this.batchTimeout = null;
-		}
-	}
-
-	private resetTimeout(): void {
-		this.clearTimeout();
-		this.batchTimeout = setTimeout(() => this.flush(), this.lingerTime);
+		return await stream.append([AppendRecord.make('', [['', 'fence']]), AppendRecord.make(encodeBigEndian64(trimSeqNum), [['', 'trim']])], {
+			fencing_token: prevFencingToken,
+		});
 	}
 }
