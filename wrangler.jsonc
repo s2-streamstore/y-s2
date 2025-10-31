@@ -24,10 +24,20 @@
 	/**
 	 * Environment Variables
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
+	 *
+	 * Note: S2_ACCESS_TOKEN and S2_BASIN are set as secrets (see below)
+	 * For local development, use: wrangler secret put S2_ACCESS_TOKEN
+	 *                              wrangler secret put S2_BASIN
+	 * In CI/CD, these are automatically injected from GitHub secrets
 	 */
-	"vars": { "ENVIRONMENT": "production", "S2_ACCESS_TOKEN": "<your_access_token>", "S2_BASIN": "<your_basin>" },
+	"vars": { "ENVIRONMENT": "production" },
+	/**
+	 * R2 Buckets
+	 * ${R2_BUCKET_NAME} will be substituted during CI deployment
+	 * For local development, replace with your actual bucket name or set R2_BUCKET_NAME env var
+	 */
 	"r2_buckets": [
-		{ "binding": "R2_BUCKET", "bucket_name": "<your_bucket>" }
+		{ "binding": "R2_BUCKET", "bucket_name": "${R2_BUCKET_NAME}" }
 	]
 	/**
 	 * Note: Use secrets to store sensitive data.
