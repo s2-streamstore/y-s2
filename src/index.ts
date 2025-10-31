@@ -1,12 +1,8 @@
-import { S2 } from '@s2-dev/streamstore';
-import type { EventStream } from '@s2-dev/streamstore/lib/event-streams.js';
-import { S2Format, type ReadEvent } from '@s2-dev/streamstore/models/components';
-import { TailResponse } from '@s2-dev/streamstore/models/errors';
+import { S2, RangeNotSatisfiableError, type SequencedRecord } from '@s2-dev/streamstore';
 import * as Y from 'yjs';
 import * as decoding from 'lib0/decoding';
 import * as awarenessProtocol from 'y-protocols/awareness';
 import * as array from 'lib0/array';
-import { toUint8Array } from 'js-base64';
 import { createLogger, S2Logger } from './logger.js';
 import {
 	encodeAwarenessUpdate,
@@ -168,12 +164,10 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
 		let { catchupSeqNum, snapshotState } = await initializeFromSnapshot();
 
-		const tailResponse = await s2Client.records.checkTail({
-			stream: streamName,
-			s2Basin: env.S2_BASIN,
-		});
+		const stream = s2Client.basin(env.S2_BASIN).stream(streamName);
+		const tailResponse = await stream.checkTail();
 
-		const tailSeqNum = tailResponse.tail.seqNum;
+		const tailSeqNum = tailResponse.tail.seq_num;
 
 		logger.info(
 			'Starting catchup from S2',
@@ -209,39 +203,37 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				attempts++;
 				try {
 					logger.info('Starting S2 event stream', { room, catchupSeqNum: currentCatchupSeqNum, attempt: attempts }, 'S2EventStream');
-					const events = await s2Client.records.read(
-						{
-							stream: streamName,
-							s2Basin: env.S2_BASIN,
-							seqNum: currentCatchupSeqNum,
-							s2Format: S2Format.Base64,
-							clamp: true,
-						},
-						{ acceptHeaderOverride: 'text/event-stream' as any },
-					);
+					const session = await stream.readSession({
+						seq_num: currentCatchupSeqNum,
+						as: 'bytes',
+						clamp: true,
+					});
 
-					return await processEventStream(events as EventStream<ReadEvent>, currentCatchupSeqNum, currentSnapshotState);
+					return await processEventStream(session, currentCatchupSeqNum, currentSnapshotState);
 				} catch (err) {
-					if (err instanceof TailResponse) {
+					if (err instanceof RangeNotSatisfiableError) {
 						logger.warn(
-							'TailResponse received - sequence number out of range',
+							'RangeNotSatisfiableError received - sequence number out of range',
 							{
 								room,
 								requestedSeqNum: currentCatchupSeqNum,
-								actualTailSeqNum: err.tail.seqNum,
-								error: err.message,
+								error: err instanceof Error ? err.message : String(err),
 								attempt: attempts,
 							},
-							'TailResponseReceived',
+							'RangeNotSatisfiableError',
 						);
 
-						if (currentCatchupSeqNum < err.tail.seqNum) {
+						// Re-fetch tail to get current sequence number
+						const currentTail = await stream.checkTail();
+						const actualTailSeqNum = currentTail.tail.seq_num;
+
+						if (currentCatchupSeqNum < actualTailSeqNum) {
 							logger.info(
 								'Stale state from R2 - restarting from fresh snapshot',
 								{
 									room,
 									requestedSeqNum: currentCatchupSeqNum,
-									tailSeqNum: err.tail.seqNum,
+									tailSeqNum: actualTailSeqNum,
 									attempt: attempts,
 								},
 								'RestartFromSnapshot',
@@ -255,10 +247,10 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
 							continue;
 						} else {
-							logger.warn('TailResponse for sequence number higher than tail - not restarting', {
+							logger.warn('RangeNotSatisfiableError for sequence number higher than tail - not restarting', {
 								room,
 								requestedSeqNum: currentCatchupSeqNum,
-								tailSeqNum: err.tail.seqNum,
+								tailSeqNum: actualTailSeqNum,
 								attempt: attempts,
 							});
 							throw err;
@@ -282,7 +274,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 		};
 
 		const processEventStream = async (
-			events: EventStream<ReadEvent>,
+			session: AsyncIterable<SequencedRecord<'bytes'>>,
 			currentCatchupSeqNum: number,
 			currentSnapshotState: SnapshotState,
 		): Promise<void> => {
@@ -303,169 +295,171 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				sendSyncMessages();
 			}
 
-			for await (const event of events) {
-				if (event.event === 'batch' && event.data?.records) {
-					for (const r of event.data.records) {
-						currentSnapshotState.trimSeqNum = r.seqNum;
+			for await (const r of session) {
+				currentSnapshotState.trimSeqNum = r.seq_num;
 
-						if (isFenceCommand(r)) {
-							if (r.seqNum > currentSnapshotState.lastProcessedFenceSeqNum) {
-								currentSnapshotState.currentFencingToken = atob(r.body ?? '');
-								currentSnapshotState.lastProcessedFenceSeqNum = r.seqNum;
-								if (!r.body) {
-									currentSnapshotState.blocked = false;
-								}
-								logger.debug(
-									'Received fencing token',
-									{
-										room,
-										fencingToken: currentSnapshotState.currentFencingToken,
-									},
-									'FencingToken',
-								);
-							}
-							continue;
-						}
-
+				if (isFenceCommand(r)) {
+					if (r.seq_num > currentSnapshotState.lastProcessedFenceSeqNum) {
+						// body is now Uint8Array, convert to string
+						currentSnapshotState.currentFencingToken = r.body ? new TextDecoder().decode(r.body) : '';
+						currentSnapshotState.lastProcessedFenceSeqNum = r.seq_num;
 						if (!r.body) {
-							continue;
+							currentSnapshotState.blocked = false;
 						}
-
-						if (isTrimCommand(r)) {
-							const trimSeqNum = decodeBigEndian64AsNumber(r.body);
-							if (trimSeqNum > currentSnapshotState.lastProcessedTrimSeqNum) {
-								currentSnapshotState.firstRecordAge = null;
-								currentSnapshotState.lastProcessedTrimSeqNum = trimSeqNum;
-								currentSnapshotState.recordBuffer = currentSnapshotState.recordBuffer.filter((r) => r.seqNum > trimSeqNum);
-								logger.debug(
-									'Received trim command',
-									{
-										room,
-										seqNum: trimSeqNum,
-									},
-									'TrimCommand',
-								);
-							}
-							continue;
-						}
-
-						currentSnapshotState.recordBuffer.push(r);
-
-						if (currentSnapshotState.firstRecordAge === null) {
-							currentSnapshotState.firstRecordAge = r.timestamp;
-						}
-
-						if (isCatchingUp) {
-							if (r.seqNum + 1 >= tailSeqNum) {
-								isCatchingUp = false;
-								logger.info(
-									'Catchup completed, processing records',
-									{
-										room,
-										recordCount: currentSnapshotState.recordBuffer.length,
-										finalSeqNum: r.seqNum,
-									},
-									'S2Catchup',
-								);
-
-								let docChanged = false;
-								ydoc.once('afterTransaction', (tr) => {
-									docChanged = tr.changed.size > 0;
-								});
-
-								ydoc.transact(() => {
-									for (const record of currentSnapshotState.recordBuffer) {
-										try {
-											const recordBytes = toUint8Array(record.body!);
-
-											const decoder = decoding.createDecoder(recordBytes);
-											const messageType = decoding.readUint8(decoder);
-
-											if (messageType === messageSync) {
-												const syncType = decoding.readUint8(decoder);
-												if (syncType === messageSyncUpdate || syncType === messageSyncStep2) {
-													const update = decoding.readVarUint8Array(decoder);
-													Y.applyUpdate(ydoc, update);
-												}
-											} else if (messageType === messageAwareness) {
-												const awarenessUpdate = decoding.readVarUint8Array(decoder);
-												awarenessProtocol.applyAwarenessUpdate(awareness, awarenessUpdate, null);
-											}
-										} catch (err) {
-											logger.error(
-												'Failed to apply catchup record',
-												{
-													room,
-													error: err instanceof Error ? err.message : String(err),
-												},
-												'CatchupError',
-											);
-										}
-									}
-								});
-
-								logger.debug(
-									'Catchup transaction completed',
-									{
-										room,
-										docChanged,
-										recordCount: currentSnapshotState.recordBuffer.length,
-									},
-									'CatchupComplete',
-								);
-
-								sendSyncMessages();
-							}
-							continue;
-						}
-
-						const recordBytes = toUint8Array(r.body);
-						server.send(recordBytes);
-
-						const leaseExpired = (() => {
-							if (!currentSnapshotState.currentFencingToken) return true;
-							try {
-								const { deadline } = parseFencingToken(currentSnapshotState.currentFencingToken);
-								return Date.now() > deadline * 1000;
-							} catch {
-								logger.error(
-									'Invalid fencing token format',
-									{ room, token: currentSnapshotState.currentFencingToken },
-									'FencingTokenError',
-								);
-								return false;
-							}
-						})();
-
-						const firstRecordExpired =
-							currentSnapshotState.firstRecordAge !== null && Date.now() - currentSnapshotState.firstRecordAge > backlogBufferAge;
-
-						const backlogSize =
-							currentSnapshotState.trimSeqNum !== null
-								? currentSnapshotState.trimSeqNum + 1 - currentSnapshotState.lastProcessedTrimSeqNum
-								: 0;
-
-						const shouldSnapshot =
-							(backlogSize >= maxBacklog && leaseExpired) ||
-							(firstRecordExpired && leaseExpired) ||
-							(currentSnapshotState.currentFencingToken && leaseExpired && backlogSize > 0);
-
-						if (!shouldSnapshot || currentSnapshotState.blocked) {
-							continue;
-						}
-
-						currentSnapshotState.blocked = true;
-
-						takeSnapshot(
-							env,
-							leaseDuration,
-							roomName,
-							{ ...currentSnapshotState, recordBuffer: [...currentSnapshotState.recordBuffer] },
-							room,
-							logger,
+						logger.debug(
+							'Received fencing token',
+							{
+								room,
+								fencingToken: currentSnapshotState.currentFencingToken,
+							},
+							'FencingToken',
 						);
 					}
+					continue;
 				}
+
+				if (!r.body) {
+					continue;
+				}
+
+				if (isTrimCommand(r)) {
+					// Convert Uint8Array to base64 for decodeBigEndian64AsNumber
+					const base64Body = btoa(String.fromCharCode(...r.body));
+					const trimSeqNum = decodeBigEndian64AsNumber(base64Body);
+					if (trimSeqNum > currentSnapshotState.lastProcessedTrimSeqNum) {
+						currentSnapshotState.firstRecordAge = null;
+						currentSnapshotState.lastProcessedTrimSeqNum = trimSeqNum;
+						currentSnapshotState.recordBuffer = currentSnapshotState.recordBuffer.filter((rec) => rec.seq_num > trimSeqNum);
+						logger.debug(
+							'Received trim command',
+							{
+								room,
+								seqNum: trimSeqNum,
+							},
+							'TrimCommand',
+						);
+					}
+					continue;
+				}
+
+				currentSnapshotState.recordBuffer.push(r);
+
+				if (currentSnapshotState.firstRecordAge === null) {
+					currentSnapshotState.firstRecordAge = r.timestamp;
+				}
+
+				if (isCatchingUp) {
+					if (r.seq_num + 1 >= tailSeqNum) {
+						isCatchingUp = false;
+						logger.info(
+							'Catchup completed, processing records',
+							{
+								room,
+								recordCount: currentSnapshotState.recordBuffer.length,
+								finalSeqNum: r.seq_num,
+							},
+							'S2Catchup',
+						);
+
+						let docChanged = false;
+						ydoc.once('afterTransaction', (tr) => {
+							docChanged = tr.changed.size > 0;
+						});
+
+						ydoc.transact(() => {
+							for (const record of currentSnapshotState.recordBuffer) {
+								try {
+									// body is already Uint8Array in the new SDK
+									if (!record.body) {continue;}
+									const recordBytes: Uint8Array = record.body;
+
+									const decoder = decoding.createDecoder(recordBytes);
+									const messageType = decoding.readUint8(decoder);
+
+									if (messageType === messageSync) {
+										const syncType = decoding.readUint8(decoder);
+										if (syncType === messageSyncUpdate || syncType === messageSyncStep2) {
+											const update = decoding.readVarUint8Array(decoder);
+											Y.applyUpdate(ydoc, update);
+										}
+									} else if (messageType === messageAwareness) {
+										const awarenessUpdate = decoding.readVarUint8Array(decoder);
+										awarenessProtocol.applyAwarenessUpdate(awareness, awarenessUpdate, null);
+									}
+								} catch (err) {
+									logger.error(
+										'Failed to apply catchup record',
+										{
+											room,
+											error: err instanceof Error ? err.message : String(err),
+										},
+										'CatchupError',
+									);
+								}
+							}
+						});
+
+						logger.debug(
+							'Catchup transaction completed',
+							{
+								room,
+								docChanged,
+								recordCount: currentSnapshotState.recordBuffer.length,
+							},
+							'CatchupComplete',
+						);
+
+						sendSyncMessages();
+					}
+					continue;
+				}
+
+				// body is already Uint8Array in the new SDK
+				const recordBytes = r.body;
+				server.send(recordBytes);
+
+				const leaseExpired = (() => {
+					if (!currentSnapshotState.currentFencingToken) {return true;}
+					try {
+						const { deadline } = parseFencingToken(currentSnapshotState.currentFencingToken);
+						return Date.now() > deadline * 1000;
+					} catch {
+						logger.error(
+							'Invalid fencing token format',
+							{ room, token: currentSnapshotState.currentFencingToken },
+							'FencingTokenError',
+						);
+						return false;
+					}
+				})();
+
+				const firstRecordExpired =
+					currentSnapshotState.firstRecordAge !== null && Date.now() - currentSnapshotState.firstRecordAge > backlogBufferAge;
+
+				const backlogSize =
+					currentSnapshotState.trimSeqNum !== null
+						? currentSnapshotState.trimSeqNum + 1 - currentSnapshotState.lastProcessedTrimSeqNum
+						: 0;
+
+				const shouldSnapshot =
+					(backlogSize >= maxBacklog && leaseExpired) ||
+					(firstRecordExpired && leaseExpired) ||
+					(currentSnapshotState.currentFencingToken && leaseExpired && backlogSize > 0);
+
+				if (!shouldSnapshot || currentSnapshotState.blocked) {
+					continue;
+				}
+
+				currentSnapshotState.blocked = true;
+
+				takeSnapshot(
+					env,
+					leaseDuration,
+					roomName,
+					{ ...currentSnapshotState, recordBuffer: [...currentSnapshotState.recordBuffer] },
+					room,
+					logger,
+				);
 			}
 		};
 
@@ -626,7 +620,7 @@ async function handlePermissionCheck(request: Request): Promise<Response> {
 	const url = new URL(request.url);
 
 	const match = url.pathname.match(/^\/auth\/perm\/(.+)\/(.+)$/);
-	if (!match || !match[1] || !match[2]) {
+	if (!match?.[1] || !match[2]) {
 		return new Response('Invalid path', { status: 400 });
 	}
 
@@ -674,10 +668,10 @@ async function takeSnapshot(
 		}
 
 		const { recordBuffer } = snapshotStateCopy;
-		if (recordBuffer.length > 0 && recordBuffer[0].seqNum < startSeqNum) {
+		if (recordBuffer.length > 0 && recordBuffer[0].seq_num < startSeqNum) {
 			logger.warn('Record buffer is stale, aborting snapshot', {
 				roomName,
-				firstRecordSeqNum: recordBuffer[0].seqNum,
+				firstRecordSeqNum: recordBuffer[0].seq_num,
 				startSeqNum,
 			});
 			ydoc.destroy();
@@ -686,10 +680,11 @@ async function takeSnapshot(
 
 		ydoc.transact(() => {
 			for (const record of recordBuffer) {
-				if (!record.body) continue;
+				if (!record.body) {continue;}
 
 				try {
-					const bytes = toUint8Array(record.body);
+					// body is already Uint8Array
+					const bytes: Uint8Array = record.body;
 					const decoder = decoding.createDecoder(bytes);
 					const messageType = decoding.readUint8(decoder);
 
@@ -703,7 +698,7 @@ async function takeSnapshot(
 				} catch (err) {
 					logger.error('Failed to apply record during snapshot', {
 						roomName,
-						recordSeqNum: record.seqNum,
+						recordSeqNum: record.seq_num,
 						error: err,
 					});
 				}
@@ -711,7 +706,7 @@ async function takeSnapshot(
 		});
 
 		const newSnapshot = Y.encodeStateAsUpdateV2(ydoc);
-		await uploadSnapshot(env, roomName, newSnapshot, snapshotStateCopy.trimSeqNum!, currentETag, logger);
+		await uploadSnapshot(env, roomName, newSnapshot, snapshotStateCopy.trimSeqNum, currentETag, logger);
 		ydoc.destroy();
 
 		await room.releaseLease(snapshotStateCopy.trimSeqNum!, newFencingToken);
