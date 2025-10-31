@@ -60,6 +60,12 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          secrets: |
+            S2_ACCESS_TOKEN
+            S2_BASIN
+        env:
+          S2_ACCESS_TOKEN: ${{ secrets.S2_ACCESS_TOKEN }}
+          S2_BASIN: ${{ secrets.S2_BASIN }}
 
       - name: Deployment summary
         run: |
