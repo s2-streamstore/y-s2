@@ -63,8 +63,7 @@ jobs:
             S2_BASIN
         env:          
           S2_ACCESS_TOKEN: ${{ secrets.S2_ACCESS_TOKEN }}
-          S2_BASIN: ${{ secrets.S2_BASIN }}
-          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          S2_BASIN: ${{ secrets.S2_BASIN }}          
 
       - name: Deployment summary
         run: |

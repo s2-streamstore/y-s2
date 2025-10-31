@@ -27,17 +27,15 @@
 	 *
 	 * Note: S2_ACCESS_TOKEN and S2_BASIN are set as secrets (see below)
 	 * For local development, use: wrangler secret put S2_ACCESS_TOKEN
-	 *                              wrangler secret put S2_BASIN
-	 * In CI/CD, these are automatically injected from GitHub secrets
+	 *                              wrangler secret put S2_BASIN	 
 	 */
 	"vars": { "ENVIRONMENT": "production" },
 	/**
 	 * R2 Buckets
-	 * ${R2_BUCKET_NAME} will be substituted during CI deployment
-	 * For local development, replace with your actual bucket name or set R2_BUCKET_NAME env var
+	 * Replace "test" with your actual bucket name for local development	 
 	 */
 	"r2_buckets": [
-		{ "binding": "R2_BUCKET", "bucket_name": "${R2_BUCKET_NAME}" }
+		{ "binding": "R2_BUCKET", "bucket_name": "test" }
 	]
 	/**
 	 * Note: Use secrets to store sensitive data.
