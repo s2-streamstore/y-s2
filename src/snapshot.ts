@@ -19,7 +19,7 @@ export async function uploadSnapshot(
 	const putOptions: R2PutOptions = {
 		customMetadata: {
 			timestamp: Date.now().toString(),
-			room: room,
+			room,
 			lastSeqNum: lastSeqNum?.toString() ?? '0',
 		},
 	};

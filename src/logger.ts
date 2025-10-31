@@ -1,4 +1,4 @@
-import { S2 } from '@s2-dev/streamstore';
+import { S2, AppendRecord } from '@s2-dev/streamstore';
 
 export interface LogLevel {
 	DEBUG: 'debug';
@@ -123,42 +123,42 @@ export class S2Logger {
 		}
 
 		try {
-			await this.s2Client.records.append({
-				stream: this.streamName,
-				s2Basin: this.s2Basin,
-				appendInput: {
-					records: [
-						{
-							body: JSON.stringify(entry),
-						},
-					],
-				},
-			});
+			const basin = this.s2Basin;
+			const stream = this.s2Client.basin(basin).stream(this.streamName);
+			await stream.append(AppendRecord.make(JSON.stringify(entry)));
 		} catch (error) {
 			console.error('Failed to log to S2:', error);
 		}
 	}
 
 	debug(message: string, data?: any, source?: string): void {
-		if (!this.shouldLog(LogLevel.DEBUG)) return;
+		if (!this.shouldLog(LogLevel.DEBUG)) {
+			return;
+		}
 		const entry = this.createLogEntry(LogLevel.DEBUG, message, data, source);
 		this.logEntry(entry);
 	}
 
 	info(message: string, data?: any, source?: string): void {
-		if (!this.shouldLog(LogLevel.INFO)) return;
+		if (!this.shouldLog(LogLevel.INFO)) {
+			return;
+		}
 		const entry = this.createLogEntry(LogLevel.INFO, message, data, source);
 		this.logEntry(entry);
 	}
 
 	warn(message: string, data?: any, source?: string): void {
-		if (!this.shouldLog(LogLevel.WARN)) return;
+		if (!this.shouldLog(LogLevel.WARN)) {
+			return;
+		}
 		const entry = this.createLogEntry(LogLevel.WARN, message, data, source);
 		this.logEntry(entry);
 	}
 
 	error(message: string, data?: any, source?: string): void {
-		if (!this.shouldLog(LogLevel.ERROR)) return;
+		if (!this.shouldLog(LogLevel.ERROR)) {
+			return;
+		}
 		const entry = this.createLogEntry(LogLevel.ERROR, message, data, source);
 		this.logEntry(entry);
 	}
@@ -176,9 +176,9 @@ export function createLogger(env: { S2_ACCESS_TOKEN?: string; S2_BASIN?: string;
 	const logMode = (env.LOG_MODE ?? 'CONSOLE') as LogMode;
 
 	return new S2Logger({
-		s2Client: logMode !== LogMode.CONSOLE ? new S2({ accessToken: env.S2_ACCESS_TOKEN }) : undefined,
+		s2Client: logMode !== LogMode.CONSOLE && env.S2_ACCESS_TOKEN ? new S2({ accessToken: env.S2_ACCESS_TOKEN }) : undefined,
 		s2Basin: env.S2_BASIN,
-		logMode: logMode,
+		logMode,
 		request,
 	});
 }

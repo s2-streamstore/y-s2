@@ -1,8 +1,5 @@
-import { S2 } from '@s2-dev/streamstore';
-import { AppendAck, S2Format, SequencedRecord } from '@s2-dev/streamstore/models/components';
+import { S2, SequencedRecord, AppendRecord } from '@s2-dev/streamstore';
 import { fromUint8Array } from 'js-base64';
-import { S2Logger } from './logger';
-import { mergeMessages } from './protocol';
 
 interface Config {
 	maxBacklog: number;
@@ -52,15 +49,30 @@ enum CommandType {
 	TRIM = 'trim',
 }
 
-export function isCommandType(record: SequencedRecord, type: CommandType): boolean {
-	return record.headers?.length === 1 && record.headers[0]?.[0] === '' && record.headers[0]?.[1] === btoa(type);
+function compareHeaderValue(headerValue: string | Uint8Array, expected: string): boolean {
+	if (typeof headerValue === 'string') {
+		return headerValue === expected;
+	}
+	const decoded = new TextDecoder().decode(headerValue);
+	return decoded === expected;
 }
 
-export function isFenceCommand(record: SequencedRecord): boolean {
+export function isCommandType<Format extends 'string' | 'bytes' = 'string'>(record: SequencedRecord<Format>, type: CommandType): boolean {
+	if (!record.headers || record.headers.length !== 1) {
+		return false;
+	}
+	const header = record.headers[0];
+	if (!header) {
+		return false;
+	}
+	return compareHeaderValue(header[0] as any, '') && compareHeaderValue(header[1] as any, type);
+}
+
+export function isFenceCommand<Format extends 'string' | 'bytes' = 'string'>(record: SequencedRecord<Format>): boolean {
 	return isCommandType(record, CommandType.FENCE);
 }
 
-export function isTrimCommand(record: SequencedRecord): boolean {
+export function isTrimCommand<Format extends 'string' | 'bytes' = 'string'>(record: SequencedRecord<Format>): boolean {
 	return isCommandType(record, CommandType.TRIM);
 }
 
@@ -81,137 +93,29 @@ export function generateDeadlineFencingToken(leaseDuration: number): string {
 
 export class Room {
 	private s2Client: S2;
-	private stream: string;
+	private streamName: string;
 	private s2Basin: string;
 
-	constructor(s2Client: S2, stream: string, s2Basin: string) {
+	constructor(s2Client: S2, streamName: string, s2Basin: string) {
 		this.s2Client = s2Client;
-		this.stream = stream;
+		this.streamName = streamName;
 		this.s2Basin = s2Basin;
 	}
 
-	async acquireLease(newFencingToken: string, prevFencingToken: string): Promise<AppendAck> {
-		return await this.s2Client.records.append({
-			stream: this.stream,
-			s2Format: S2Format.Base64,
-			appendInput: {
-				records: [
-					{
-						body: btoa(newFencingToken),
-						headers: [[btoa(''), btoa('fence')]],
-					},
-				],
-				fencingToken: prevFencingToken,
-			},
-			s2Basin: this.s2Basin,
+	async acquireLease(newFencingToken: string, prevFencingToken: string) {
+		const stream = this.s2Client.basin(this.s2Basin).stream(this.streamName);
+		return await stream.append(AppendRecord.fence(newFencingToken, [['', 'fence']]), { fencing_token: prevFencingToken });
+	}
+
+	async forceReleaseLease(currentFencingToken: string) {
+		const stream = this.s2Client.basin(this.s2Basin).stream(this.streamName);
+		return await stream.append(AppendRecord.make('', [['', 'fence']]), { fencing_token: currentFencingToken });
+	}
+
+	async releaseLease(trimSeqNum: number, prevFencingToken: string) {
+		const stream = this.s2Client.basin(this.s2Basin).stream(this.streamName);
+		return await stream.append([AppendRecord.make('', [['', 'fence']]), AppendRecord.make(encodeBigEndian64(trimSeqNum), [['', 'trim']])], {
+			fencing_token: prevFencingToken,
 		});
-	}
-
-	async forceReleaseLease(currentFencingToken: string): Promise<AppendAck> {
-		return await this.s2Client.records.append({
-			stream: this.stream,
-			s2Format: S2Format.Base64,
-			appendInput: {
-				records: [
-					{
-						body: '',
-						headers: [[btoa(''), btoa('fence')]],
-					},
-				],
-				fencingToken: currentFencingToken,
-			},
-			s2Basin: this.s2Basin,
-		});
-	}
-
-	async releaseLease(trimSeqNum: number, prevFencingToken: string): Promise<AppendAck> {
-		return await this.s2Client.records.append({
-			s2Format: S2Format.Base64,
-			stream: this.stream,
-			appendInput: {
-				records: [
-					{
-						body: '',
-						headers: [[btoa(''), btoa('fence')]],
-					},
-					{
-						body: encodeBigEndian64(trimSeqNum),
-						headers: [[btoa(''), btoa('trim')]],
-					},
-				],
-				fencingToken: prevFencingToken,
-			},
-			s2Basin: this.s2Basin,
-		});
-	}
-}
-
-export class MessageBatcher {
-	private messageBatch: Uint8Array[] = [];
-	private batchTimeout: NodeJS.Timeout | null = null;
-
-	constructor(
-		private readonly s2Client: S2,
-		private readonly streamName: string,
-		private readonly s2Basin: string,
-		private readonly logger: S2Logger,
-		private readonly room: string,
-		private readonly batchSize: number,
-		private readonly lingerTime: number,
-	) {}
-
-	addMessage(message: Uint8Array): void {
-		this.messageBatch.push(message);
-
-		if (this.messageBatch.length >= this.batchSize) {
-			this.flush();
-		} else {
-			this.resetTimeout();
-		}
-	}
-
-	async flush(): Promise<void> {
-		if (this.messageBatch.length === 0) return;
-
-		const batch = [...this.messageBatch];
-		this.clearBatch();
-		this.clearTimeout();
-
-		try {
-			const messagesToSend = mergeMessages(batch);
-			const base64Messages = messagesToSend.map((msg) => fromUint8Array(msg));
-			await this.s2Client.records.append({
-				stream: this.streamName,
-				s2Basin: this.s2Basin,
-				appendInput: { records: base64Messages.map((body) => ({ body })) },
-				s2Format: S2Format.Base64,
-			});
-		} catch (err) {
-			this.logger.error(
-				'Failed to append batch to S2',
-				{
-					room: this.room,
-					streamName: this.streamName,
-					error: err instanceof Error ? err.message : String(err),
-				},
-				'S2AppendError',
-			);
-		}
-	}
-
-	private clearBatch(): void {
-		this.messageBatch = [];
-	}
-
-	private clearTimeout(): void {
-		if (this.batchTimeout) {
-			clearTimeout(this.batchTimeout);
-			this.batchTimeout = null;
-		}
-	}
-
-	private resetTimeout(): void {
-		this.clearTimeout();
-		this.batchTimeout = setTimeout(() => this.flush(), this.lingerTime);
 	}
 }

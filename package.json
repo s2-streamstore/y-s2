@@ -27,7 +27,7 @@
 		"wrangler": "^4.33.1"
 	},
 	"dependencies": {
-		"@s2-dev/streamstore": "^0.15.9",
+		"@s2-dev/streamstore": "^0.16.11",
 		"js-base64": "^3.7.8",
 		"lib0": "^0.2.114",
 		"y-protocols": "^1.0.5",

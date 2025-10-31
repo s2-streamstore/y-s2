@@ -84,7 +84,7 @@ export function mergeMessages(messages: Uint8Array[]): Uint8Array[] {
 
 	const result: Uint8Array[] = [];
 
-	updates.length > 0 &&
+	if (updates.length > 0) {
 		result.push(
 			encoding.encode((encoder) => {
 				encoding.writeVarUint(encoder, messageSync);
@@ -92,14 +92,16 @@ export function mergeMessages(messages: Uint8Array[]): Uint8Array[] {
 				encoding.writeVarUint8Array(encoder, Y.mergeUpdates(updates));
 			}),
 		);
+	}
 
-	aw.states.size > 0 &&
+	if (aw.states.size > 0) {
 		result.push(
 			encoding.encode((encoder) => {
 				encoding.writeVarUint(encoder, messageAwareness);
 				encoding.writeVarUint8Array(encoder, awarenessProtocol.encodeAwarenessUpdate(aw, array.from(aw.getStates().keys())));
 			}),
 		);
+	}
 
 	return result;
 }
