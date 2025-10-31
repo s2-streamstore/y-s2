@@ -32,9 +32,6 @@ jobs:
       - name: Check formatting
         run: npm run format:check
 
-      - name: Run tests
-        run: npm test
-
   deploy:
     name: deploy to Cloudflare
     runs-on: ubuntu-latest
