@@ -1,4 +1,4 @@
-import { S2, SequencedRecord, AppendRecord } from '@s2-dev/streamstore';
+import { S2, AppendRecord, SequencedRecord } from '@s2-dev/streamstore';
 import { fromUint8Array } from 'js-base64';
 
 interface Config {
@@ -104,7 +104,7 @@ export class Room {
 
 	async acquireLease(newFencingToken: string, prevFencingToken: string) {
 		const stream = this.s2Client.basin(this.s2Basin).stream(this.streamName);
-		return await stream.append(AppendRecord.fence(newFencingToken, [['', 'fence']]), { fencing_token: prevFencingToken });
+		return await stream.append(AppendRecord.make(newFencingToken, [['', 'fence']]), { fencing_token: prevFencingToken });
 	}
 
 	async forceReleaseLease(currentFencingToken: string) {
