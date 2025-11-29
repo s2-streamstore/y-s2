@@ -1,4 +1,4 @@
-import type { SequencedRecord } from '@s2-dev/streamstore';
+import type { ReadRecord } from '@s2-dev/streamstore';
 
 export interface UserState {
 	awarenessId: number | null;
@@ -21,7 +21,7 @@ export interface SnapshotState {
 	lastProcessedFenceSeqNum: number;
 	lastProcessedTrimSeqNum: number;
 	blocked: boolean;
-	recordBuffer: SequencedRecord<'bytes'>[];
+	recordBuffer: ReadRecord<'bytes'>[];
 }
 
 export function createSnapshotState(): SnapshotState {
