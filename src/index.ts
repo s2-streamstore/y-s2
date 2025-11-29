@@ -614,18 +614,16 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					);
 				}
 			}
-			batchWriter
-				.close()
-				.catch((err: Error) => {
-					logger.error(
-						'Failed to close batch writer',
-						{
-							room,
-							error: err.message,
-						},
-						'BatchWriterCloseError',
-					);
-				});
+			batchWriter.close().catch((err: Error) => {
+				logger.error(
+					'Failed to close batch writer',
+					{
+						room,
+						error: err.message,
+					},
+					'BatchWriterCloseError',
+				);
+			});
 		});
 
 		return new Response(null, {
