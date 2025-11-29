@@ -1,4 +1,4 @@
-import { S2, AppendRecord, SequencedRecord } from '@s2-dev/streamstore';
+import { S2, AppendRecord, type ReadRecord } from '@s2-dev/streamstore';
 import { fromUint8Array } from 'js-base64';
 
 interface Config {
@@ -57,7 +57,7 @@ function compareHeaderValue(headerValue: string | Uint8Array, expected: string):
 	return decoded === expected;
 }
 
-export function isCommandType<Format extends 'string' | 'bytes' = 'string'>(record: SequencedRecord<Format>, type: CommandType): boolean {
+export function isCommandType(record: ReadRecord<'bytes'>, type: CommandType): boolean {
 	if (!record.headers || record.headers.length !== 1) {
 		return false;
 	}
@@ -68,11 +68,11 @@ export function isCommandType<Format extends 'string' | 'bytes' = 'string'>(reco
 	return compareHeaderValue(header[0] as any, '') && compareHeaderValue(header[1] as any, type);
 }
 
-export function isFenceCommand<Format extends 'string' | 'bytes' = 'string'>(record: SequencedRecord<Format>): boolean {
+export function isFenceCommand(record: ReadRecord<'bytes'>): boolean {
 	return isCommandType(record, CommandType.FENCE);
 }
 
-export function isTrimCommand<Format extends 'string' | 'bytes' = 'string'>(record: SequencedRecord<Format>): boolean {
+export function isTrimCommand(record: ReadRecord<'bytes'>): boolean {
 	return isCommandType(record, CommandType.TRIM);
 }
 

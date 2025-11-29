@@ -1,4 +1,4 @@
-import { S2, RangeNotSatisfiableError, AppendRecord, type SequencedRecord } from '@s2-dev/streamstore';
+import { BatchTransform, S2, RangeNotSatisfiableError, AppendRecord, type ReadRecord } from '@s2-dev/streamstore';
 import * as Y from 'yjs';
 import * as decoding from 'lib0/decoding';
 import * as awarenessProtocol from 'y-protocols/awareness';
@@ -179,10 +179,35 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 		);
 
 		const appendSession = await stream.appendSession();
-		const batcher = appendSession.makeBatcher({
-			maxBatchSize: batchSize,
-			lingerDuration: lingerTime,
+		const batchTransform = new BatchTransform({
+			maxBatchRecords: batchSize,
+			lingerDurationMillis: lingerTime,
 		});
+		const batchWriter = batchTransform.writable.getWriter();
+		const appendPipeline = batchTransform.readable.pipeTo(appendSession.writable);
+		appendPipeline
+			.catch((error: unknown) => {
+				logger.error(
+					'Append pipeline failed',
+					{
+						room,
+						error: error instanceof Error ? error.message : String(error),
+					},
+					'AppendPipelineError',
+				);
+			})
+			.finally(() => {
+				appendSession.close().catch((error: unknown) => {
+					logger.error(
+						'Failed to close append session',
+						{
+							room,
+							error: error instanceof Error ? error.message : String(error),
+						},
+						'AppendSessionCloseError',
+					);
+				});
+			});
 
 		const sendSyncMessages = (): void => {
 			server.send(encodeSyncStep1(Y.encodeStateVector(ydoc)));
@@ -277,7 +302,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 		};
 
 		const processEventStream = async (
-			session: AsyncIterable<SequencedRecord<'bytes'>>,
+			session: AsyncIterable<ReadRecord<'bytes'>>,
 			currentCatchupSeqNum: number,
 			currentSnapshotState: SnapshotState,
 		): Promise<void> => {
@@ -522,7 +547,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 						return;
 					}
 				}
-				batcher.submit(AppendRecord.make(buffer)).catch((err: Error) => {
+				batchWriter.write(AppendRecord.make(buffer)).catch((err: Error) => {
 					logger.error(
 						'Failed to submit message to batcher',
 						{
@@ -557,7 +582,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			if (userState.awarenessId !== null) {
 				try {
 					const disconnectMessage = encodeAwarenessUserDisconnected(userState.awarenessId, userState.awarenessLastClock);
-					batcher.submit(AppendRecord.make(disconnectMessage)).catch((err: Error) => {
+					batchWriter.write(AppendRecord.make(disconnectMessage)).catch((err: Error) => {
 						logger.error(
 							'Failed to submit disconnect message',
 							{
@@ -589,7 +614,16 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					);
 				}
 			}
-			batcher.flush();
+			batchWriter.close().catch((err: Error) => {
+				logger.error(
+					'Failed to close batch writer',
+					{
+						room,
+						error: err.message,
+					},
+					'BatchWriterCloseError',
+				);
+			});
 		});
 
 		return new Response(null, {
