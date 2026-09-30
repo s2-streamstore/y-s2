@@ -453,7 +453,9 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 						return Date.now() > deadline * 1000;
 					} catch {
 						logger.error('Invalid fencing token format', { room, token: currentSnapshotState.currentFencingToken }, 'FencingTokenError');
-						return false;
+						// A token we cannot read holds no valid lease. Treat it like a
+						// missing token so snapshots (and trimming) are not blocked forever.
+						return true;
 					}
 				})();
 
