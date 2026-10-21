@@ -1,4 +1,4 @@
-import { BatchTransform, RangeNotSatisfiableError, AppendRecord, type ReadSession } from '@s2-dev/streamstore';
+import { BatchTransform, FencingTokenMismatchError, RangeNotSatisfiableError, AppendRecord, type ReadSession } from '@s2-dev/streamstore';
 import * as Y from 'yjs';
 import * as decoding from 'lib0/decoding';
 import * as awarenessProtocol from 'y-protocols/awareness';
@@ -145,7 +145,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				logger.info(
 					'Snapshot retrieved, applying to document',
 					{
-						room,
+						room: roomName,
 						lastSeqNum: checkpoint.lastSeqNum,
 						snapshotSize: checkpoint.snapshot.length,
 					},
@@ -153,7 +153,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				);
 				Y.applyUpdateV2(ydoc, checkpoint.snapshot);
 			} else {
-				logger.debug('No snapshot found, starting with empty document', { room }, 'SnapshotRestore');
+				logger.debug('No snapshot found, starting with empty document', { room: roomName }, 'SnapshotRestore');
 			}
 
 			const newSnapshotState = createSnapshotState();
@@ -168,11 +168,13 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 		let { catchupSeqNum, snapshotState } = await initializeFromSnapshot();
 
 		const stream = s2Client.basin(env.S2_BASIN).stream(streamName);
+		// Aborted when the client disconnects, so the read loop (and its snapshotting) stops with it.
+		const readAbort = new AbortController();
 
 		logger.info(
 			'Starting catchup from S2',
 			{
-				room,
+				room: roomName,
 				fromSeqNum: catchupSeqNum,
 			},
 			'S2Catchup',
@@ -190,7 +192,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				logger.error(
 					'Append pipeline failed',
 					{
-						room,
+						room: roomName,
 						error: error instanceof Error ? error.message : String(error),
 					},
 					'AppendPipelineError',
@@ -201,7 +203,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					logger.error(
 						'Failed to close append session',
 						{
-							room,
+							room: roomName,
 							error: error instanceof Error ? error.message : String(error),
 						},
 						'AppendSessionCloseError',
@@ -230,21 +232,29 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			while (attempts < maxAttempts) {
 				attempts++;
 				try {
-					logger.info('Starting S2 event stream', { room, catchupSeqNum: currentCatchupSeqNum, attempt: attempts }, 'S2EventStream');
+					logger.info(
+						'Starting S2 event stream',
+						{ room: roomName, catchupSeqNum: currentCatchupSeqNum, attempt: attempts },
+						'S2EventStream',
+					);
 					const session = await stream.readSession(
 						{
 							start: { from: { seqNum: currentCatchupSeqNum }, clamp: true },
 						},
-						{ as: 'bytes' },
+						{ as: 'bytes', signal: readAbort.signal },
 					);
 
 					return await processEventStream(session, currentCatchupSeqNum, currentSnapshotState);
 				} catch (err) {
+					// The client disconnected and the read session was aborted.
+					if (readAbort.signal.aborted) {
+						return;
+					}
 					if (err instanceof RangeNotSatisfiableError) {
 						logger.warn(
 							'RangeNotSatisfiableError received - sequence number out of range',
 							{
-								room,
+								room: roomName,
 								requestedSeqNum: currentCatchupSeqNum,
 								error: err instanceof Error ? err.message : String(err),
 								attempt: attempts,
@@ -260,7 +270,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							logger.info(
 								'Stale state from R2 - restarting from fresh snapshot',
 								{
-									room,
+									room: roomName,
 									requestedSeqNum: currentCatchupSeqNum,
 									tailSeqNum: actualTailSeqNum,
 									attempt: attempts,
@@ -277,7 +287,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							continue;
 						} else {
 							logger.warn('RangeNotSatisfiableError for sequence number higher than tail - not restarting', {
-								room,
+								room: roomName,
 								requestedSeqNum: currentCatchupSeqNum,
 								tailSeqNum: actualTailSeqNum,
 								attempt: attempts,
@@ -289,7 +299,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							'S2 stream read error',
 							{
 								error: err instanceof Error ? err.message : String(err),
-								room,
+								room: roomName,
 								attempt: attempts,
 							},
 							'S2StreamError',
@@ -299,7 +309,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				}
 			}
 
-			logger.error('Max retry attempts reached for stream reading', { room, maxAttempts }, 'MaxRetriesReached');
+			logger.error('Max retry attempts reached for stream reading', { room: roomName, maxAttempts }, 'MaxRetriesReached');
 		};
 
 		const processEventStream = async (
@@ -318,7 +328,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					logger.info(
 						'Catchup completed, processing records',
 						{
-							room,
+							room: roomName,
 							recordCount: currentSnapshotState.recordBuffer.length,
 							fromSeqNum: currentCatchupSeqNum,
 							tailSeqNum: tail.seqNum,
@@ -356,7 +366,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 								logger.error(
 									'Failed to apply catchup record',
 									{
-										room,
+										room: roomName,
 										error: err instanceof Error ? err.message : String(err),
 									},
 									'CatchupError',
@@ -368,7 +378,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					logger.debug(
 						'Catchup transaction completed',
 						{
-							room,
+							room: roomName,
 							docChanged,
 							recordCount: currentSnapshotState.recordBuffer.length,
 						},
@@ -389,13 +399,13 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					if (r.seqNum > currentSnapshotState.lastProcessedFenceSeqNum) {
 						currentSnapshotState.currentFencingToken = new TextDecoder().decode(r.body);
 						currentSnapshotState.lastProcessedFenceSeqNum = r.seqNum;
-						if (r.body.length === 0) {
-							currentSnapshotState.blocked = false;
-						}
+						// Any new fence settles an in-flight lease race (acquired, released, or lost to
+						// another connection), so the lease deadline alone gates the next attempt.
+						currentSnapshotState.blocked = false;
 						logger.debug(
 							'Received fencing token',
 							{
-								room,
+								room: roomName,
 								fencingToken: currentSnapshotState.currentFencingToken,
 							},
 							'FencingToken',
@@ -417,7 +427,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 						logger.debug(
 							'Received trim command',
 							{
-								room,
+								room: roomName,
 								seqNum: trimSeqNum,
 							},
 							'TrimCommand',
@@ -447,7 +457,11 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 						const { deadline } = parseFencingToken(currentSnapshotState.currentFencingToken);
 						return Date.now() > deadline * 1000;
 					} catch {
-						logger.error('Invalid fencing token format', { room, token: currentSnapshotState.currentFencingToken }, 'FencingTokenError');
+						logger.error(
+							'Invalid fencing token format',
+							{ room: roomName, token: currentSnapshotState.currentFencingToken },
+							'FencingTokenError',
+						);
 						return false;
 					}
 				})();
@@ -469,6 +483,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
 				currentSnapshotState.blocked = true;
 
+				const blockedState = currentSnapshotState;
 				takeSnapshot(
 					env,
 					leaseDuration,
@@ -476,6 +491,9 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					{ ...currentSnapshotState, recordBuffer: [...currentSnapshotState.recordBuffer] },
 					room,
 					logger,
+					() => {
+						blockedState.blocked = false;
+					},
 				);
 			}
 		};
@@ -486,7 +504,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			} catch (err) {
 				logger.error(
 					'Failed to read stream after all retries',
-					{ error: err instanceof Error ? err.message : String(err), room },
+					{ error: err instanceof Error ? err.message : String(err), room: roomName },
 					'StreamReadFailure',
 				);
 			}
@@ -534,7 +552,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 						logger.error(
 							'Failed to decode awareness message',
 							{
-								room,
+								room: roomName,
 								error: err instanceof Error ? err.message : String(err),
 							},
 							'AwarenessError',
@@ -546,7 +564,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					logger.error(
 						'Failed to submit message to batcher',
 						{
-							room,
+							room: roomName,
 							error: err.message,
 						},
 						'BatcherSubmitError',
@@ -556,7 +574,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				logger.error(
 					'Message processing error',
 					{
-						room,
+						room: roomName,
 						error: err instanceof Error ? err.message : String(err),
 					},
 					'MessageError',
@@ -565,10 +583,11 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 		});
 
 		server.addEventListener('close', async () => {
+			readAbort.abort();
 			logger.info(
 				'WebSocket connection closed',
 				{
-					room,
+					room: roomName,
 					userId: userState.awarenessId,
 				},
 				'WebSocketClose',
@@ -581,7 +600,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 						logger.error(
 							'Failed to submit disconnect message',
 							{
-								room,
+								room: roomName,
 								userId: userState.awarenessId,
 								error: err.message,
 							},
@@ -591,7 +610,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					logger.info(
 						'User disconnect message queued',
 						{
-							room,
+							room: roomName,
 							userId: userState.awarenessId,
 							clock: userState.awarenessLastClock,
 						},
@@ -601,7 +620,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					logger.error(
 						'Failed to create disconnect message',
 						{
-							room,
+							room: roomName,
 							userId: userState.awarenessId,
 							error: err instanceof Error ? err.message : String(err),
 						},
@@ -613,7 +632,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				logger.error(
 					'Failed to close batch writer',
 					{
-						room,
+						room: roomName,
 						error: err.message,
 					},
 					'BatchWriterCloseError',
@@ -692,16 +711,26 @@ async function takeSnapshot(
 	snapshotStateCopy: SnapshotState,
 	room: Room,
 	logger: S2Logger,
+	unblock: () => void,
 ): Promise<void> {
 	const newFencingToken = generateDeadlineFencingToken(leaseDuration);
-	const currentETag = await getSnapshotETag(env, roomName, logger);
+	let currentETag: string | null;
 
 	try {
+		currentETag = await getSnapshotETag(env, roomName, logger);
 		await room.acquireLease(newFencingToken, snapshotStateCopy.currentFencingToken);
 	} catch (err) {
+		if (err instanceof FencingTokenMismatchError) {
+			// Another connection won the race; reading its fence record unblocks us.
+			logger.debug('Lease held by another connection, skipping snapshot', { roomName }, 'LeaseContention');
+			return;
+		}
 		logger.error('Lease acquisition failed, skipping snapshot', { roomName, error: err }, 'LeaseAcquisitionError');
+		unblock();
 		return;
 	}
+
+	let released = false;
 
 	try {
 		const snapshot = await retrieveSnapshot(env, roomName, logger);
@@ -756,6 +785,7 @@ async function takeSnapshot(
 		ydoc.destroy();
 
 		await room.releaseLease(snapshotStateCopy.trimSeqNum!, newFencingToken);
+		released = true;
 
 		logger.info('Snapshot completed successfully', {
 			roomName,
@@ -765,10 +795,12 @@ async function takeSnapshot(
 	} catch (err) {
 		logger.error('Snapshot failed after acquiring lease', { roomName, error: err });
 	} finally {
-		try {
-			await room.forceReleaseLease(newFencingToken);
-		} catch (err) {
-			logger.error('Failed to release lease', { roomName, error: err });
+		if (!released) {
+			try {
+				await room.forceReleaseLease(newFencingToken);
+			} catch (err) {
+				logger.error('Failed to release lease', { roomName, error: err });
+			}
 		}
 	}
 }
