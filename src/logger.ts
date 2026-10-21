@@ -1,4 +1,5 @@
 import { S2, AppendInput, AppendRecord } from '@s2-dev/streamstore';
+import { createS2Client } from './utils.js';
 
 export interface LogLevel {
 	DEBUG: 'debug';
@@ -185,11 +186,15 @@ export function parseLogMode(value: string | undefined): LogMode {
 	return LogMode.CONSOLE;
 }
 
-export function createLogger(env: { S2_ACCESS_TOKEN?: string; S2_BASIN?: string; LOG_MODE?: string }, request?: Request): S2Logger {
+export function createLogger(
+	env: { S2_ACCESS_TOKEN?: string; S2_BASIN?: string; LOG_MODE?: string; S2_ACCOUNT_ENDPOINT?: string; S2_BASIN_ENDPOINT?: string },
+	request?: Request,
+): S2Logger {
 	const logMode = parseLogMode(env.LOG_MODE);
 
 	return new S2Logger({
-		s2Client: logMode !== LogMode.CONSOLE && env.S2_ACCESS_TOKEN ? new S2({ accessToken: env.S2_ACCESS_TOKEN }) : undefined,
+		s2Client:
+			logMode !== LogMode.CONSOLE && env.S2_ACCESS_TOKEN ? createS2Client({ ...env, S2_ACCESS_TOKEN: env.S2_ACCESS_TOKEN }) : undefined,
 		s2Basin: env.S2_BASIN,
 		logMode,
 		request,

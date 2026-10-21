@@ -1,11 +1,4 @@
-import {
-	BatchTransform,
-	FencingTokenMismatchError,
-	S2,
-	RangeNotSatisfiableError,
-	AppendRecord,
-	type ReadSession,
-} from '@s2-dev/streamstore';
+import { BatchTransform, FencingTokenMismatchError, RangeNotSatisfiableError, AppendRecord, type ReadSession } from '@s2-dev/streamstore';
 import * as Y from 'yjs';
 import * as decoding from 'lib0/decoding';
 import * as awarenessProtocol from 'y-protocols/awareness';
@@ -28,6 +21,7 @@ import {
 	generateDeadlineFencingToken,
 	isFenceCommand,
 	isTrimCommand,
+	createS2Client,
 	parseConfig,
 	parseFencingToken,
 	Room,
@@ -37,6 +31,9 @@ import { createSnapshotState, createUserState, SnapshotState } from './types.js'
 export interface Env {
 	// S2 access token
 	S2_ACCESS_TOKEN: string;
+	// Optional S2 endpoint overrides, e.g. http://localhost:8080 for s2-lite
+	S2_ACCOUNT_ENDPOINT?: string;
+	S2_BASIN_ENDPOINT?: string;
 	// S2 basin name
 	S2_BASIN: string;
 	// R2 bucket for snapshots
@@ -117,7 +114,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 		server.accept();
 		logger.info('WebSocket connection established', { roomName }, 'WebSocketConnection');
 
-		const s2Client = new S2({ accessToken: env.S2_ACCESS_TOKEN });
+		const s2Client = createS2Client(env);
 		const streamName = `rooms/${encodeURIComponent(roomName)}/index`;
 
 		const { maxBacklog, batchSize, lingerTime, leaseDuration, backlogBufferAge } = parseConfig(env);
