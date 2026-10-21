@@ -12,6 +12,9 @@ import * as awarenessProtocol from 'y-protocols/awareness';
 import * as array from 'lib0/array';
 import { createLogger, S2Logger } from './logger.js';
 import {
+	AwarenessClocks,
+	decodeAwarenessMessage,
+	encodeAwarenessMessage,
 	encodeAwarenessUpdate,
 	encodeAwarenessUserDisconnected,
 	encodeSyncStep1,
@@ -129,6 +132,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 		awareness.setLocalState(null);
 
 		const userState = createUserState(roomName);
+		const awarenessClocks = new AwarenessClocks();
 
 		const initializeFromSnapshot = async () => {
 			const checkpoint = await retrieveSnapshot(env, roomName, logger);
@@ -439,6 +443,15 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					continue;
 				}
 
+				// Track awareness clocks before the record can reach the client, so its echo is recognized.
+				if (r.body[0] === messageAwareness) {
+					try {
+						awarenessClocks.observe(decodeAwarenessMessage(r.body));
+					} catch {
+						// Malformed awareness record: nothing to track.
+					}
+				}
+
 				currentSnapshotState.recordBuffer.push(r);
 
 				if (currentSnapshotState.firstRecordAge === null) {
@@ -518,7 +531,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
 		server.addEventListener('message', async (event: MessageEvent) => {
 			try {
-				const buffer = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : new TextEncoder().encode(event.data);
+				let buffer = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : new TextEncoder().encode(event.data);
 
 				const messageType = buffer[0];
 
@@ -544,15 +557,19 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
 				if (messageType === messageAwareness) {
 					try {
-						const decoder = decoding.createDecoder(buffer);
-						decoding.readVarUint(decoder);
-						decoding.readVarUint(decoder);
-						const alen = decoding.readVarUint(decoder);
-						const awId = decoding.readVarUint(decoder);
+						// Drop entries the stream already has (the client echoing what we relayed to it).
+						const entries = decodeAwarenessMessage(buffer);
+						const fresh = awarenessClocks.fresh(entries);
+						if (fresh.length === 0) {
+							return;
+						}
+						if (fresh.length !== entries.length) {
+							buffer = encodeAwarenessMessage(fresh);
+						}
 
-						if (alen === 1 && (userState.awarenessId === null || userState.awarenessId === awId)) {
-							userState.awarenessId = awId;
-							userState.awarenessLastClock = decoding.readVarUint(decoder);
+						if (fresh.length === 1 && (userState.awarenessId === null || userState.awarenessId === fresh[0].clientID)) {
+							userState.awarenessId = fresh[0].clientID;
+							userState.awarenessLastClock = fresh[0].clock;
 						}
 					} catch (err) {
 						logger.error(
