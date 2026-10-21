@@ -89,6 +89,10 @@ export const encodeAwarenessMessage = (entries: AwarenessEntry[]): Uint8Array =>
 		);
 	});
 
+// y-protocols considers a client gone after 30s without its 15s heartbeat, and peers echo that
+// removal right away, so an entry not refreshed for this long can no longer be echoed.
+const AWARENESS_ENTRY_TTL_MS = 60_000;
+
 /**
  * Latest awareness clock per client seen on the room stream.
  *
@@ -96,19 +100,31 @@ export const encodeAwarenessMessage = (entries: AwarenessEntry[]): Uint8Array =>
  * to them from the stream. Awareness clocks only move forward, so an entry whose clock is not newer
  * than what the stream already has is an echo and must not be appended again: otherwise every
  * update is written once more per connected client and fanned out to all of them.
+ *
+ * Clients that stop updating are forgotten after a while, so long-lived connections in rooms with
+ * many comings and goings do not accumulate an entry per past visitor.
  */
 export class AwarenessClocks {
-	private readonly clocks = new Map<number, number>();
+	private readonly clocks = new Map<number, { clock: number; seenAt: number }>();
+	private lastSweep = 0;
 
-	observe(entries: AwarenessEntry[]): void {
+	observe(entries: AwarenessEntry[], now = Date.now()): void {
 		for (const { clientID, clock } of entries) {
-			if (clock > (this.clocks.get(clientID) ?? -1)) {
-				this.clocks.set(clientID, clock);
+			if (clock > (this.clocks.get(clientID)?.clock ?? -1)) {
+				this.clocks.set(clientID, { clock, seenAt: now });
+			}
+		}
+		if (now - this.lastSweep >= AWARENESS_ENTRY_TTL_MS) {
+			this.lastSweep = now;
+			for (const [clientID, { seenAt }] of this.clocks) {
+				if (now - seenAt > AWARENESS_ENTRY_TTL_MS) {
+					this.clocks.delete(clientID);
+				}
 			}
 		}
 	}
 
 	fresh(entries: AwarenessEntry[]): AwarenessEntry[] {
-		return entries.filter(({ clientID, clock }) => clock > (this.clocks.get(clientID) ?? -1));
+		return entries.filter(({ clientID, clock }) => clock > (this.clocks.get(clientID)?.clock ?? -1));
 	}
 }
