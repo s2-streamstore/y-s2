@@ -58,4 +58,11 @@ describe('fencing tokens', () => {
 		const { deadline } = parseFencingToken(token);
 		expect(deadline).toBeGreaterThan(Date.now() / 1000);
 	});
+
+	it('rejects tokens without a numeric deadline', () => {
+		// A NaN deadline would make `Date.now() > deadline * 1000` false forever, i.e. a lease that never expires.
+		for (const token of ['abc not-a-deadline', 'abc', 'abc ', '']) {
+			expect(() => parseFencingToken(token)).toThrow('Invalid fencing token format');
+		}
+	});
 });
