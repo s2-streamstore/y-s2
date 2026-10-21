@@ -324,6 +324,78 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				sendSyncMessages();
 			}
 
+			const completeCatchup = (finalSeqNum: number): void => {
+				logger.info(
+					'Catchup completed, processing records',
+					{
+						room,
+						recordCount: currentSnapshotState.recordBuffer.length,
+						finalSeqNum,
+					},
+					'S2Catchup',
+				);
+
+				let docChanged = false;
+				ydoc.once('afterTransaction', (tr) => {
+					docChanged = tr.changed.size > 0;
+				});
+
+				ydoc.transact(() => {
+					for (const record of currentSnapshotState.recordBuffer) {
+						try {
+							if (record.body.length === 0) {
+								continue;
+							}
+							const recordBytes: Uint8Array = record.body;
+
+							const decoder = decoding.createDecoder(recordBytes);
+							const messageType = decoding.readUint8(decoder);
+
+							if (messageType === messageSync) {
+								const syncType = decoding.readUint8(decoder);
+								if (syncType === messageSyncUpdate || syncType === messageSyncStep2) {
+									const update = decoding.readVarUint8Array(decoder);
+									Y.applyUpdate(ydoc, update);
+								}
+							} else if (messageType === messageAwareness) {
+								const awarenessUpdate = decoding.readVarUint8Array(decoder);
+								awarenessProtocol.applyAwarenessUpdate(awareness, awarenessUpdate, null);
+							}
+						} catch (err) {
+							logger.error(
+								'Failed to apply catchup record',
+								{
+									room,
+									error: err instanceof Error ? err.message : String(err),
+								},
+								'CatchupError',
+							);
+						}
+					}
+				});
+
+				logger.debug(
+					'Catchup transaction completed',
+					{
+						room,
+						docChanged,
+						recordCount: currentSnapshotState.recordBuffer.length,
+					},
+					'CatchupComplete',
+				);
+
+				sendSyncMessages();
+			};
+
+			// Catchup ends at the record just before the tail observed at connect time, whatever its type:
+			// the stream commonly ends with fence/trim command records after a snapshot.
+			const maybeCompleteCatchup = (seqNum: number): void => {
+				if (isCatchingUp && seqNum + 1 >= tailSeqNum) {
+					isCatchingUp = false;
+					completeCatchup(seqNum);
+				}
+			};
+
 			for await (const r of session) {
 				currentSnapshotState.trimSeqNum = r.seqNum;
 
@@ -343,10 +415,12 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							'FencingToken',
 						);
 					}
+					maybeCompleteCatchup(r.seqNum);
 					continue;
 				}
 
 				if (r.body.length === 0) {
+					maybeCompleteCatchup(r.seqNum);
 					continue;
 				}
 
@@ -365,6 +439,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							'TrimCommand',
 						);
 					}
+					maybeCompleteCatchup(r.seqNum);
 					continue;
 				}
 
@@ -375,69 +450,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				}
 
 				if (isCatchingUp) {
-					if (r.seqNum + 1 >= tailSeqNum) {
-						isCatchingUp = false;
-						logger.info(
-							'Catchup completed, processing records',
-							{
-								room,
-								recordCount: currentSnapshotState.recordBuffer.length,
-								finalSeqNum: r.seqNum,
-							},
-							'S2Catchup',
-						);
-
-						let docChanged = false;
-						ydoc.once('afterTransaction', (tr) => {
-							docChanged = tr.changed.size > 0;
-						});
-
-						ydoc.transact(() => {
-							for (const record of currentSnapshotState.recordBuffer) {
-								try {
-									if (record.body.length === 0) {
-										continue;
-									}
-									const recordBytes: Uint8Array = record.body;
-
-									const decoder = decoding.createDecoder(recordBytes);
-									const messageType = decoding.readUint8(decoder);
-
-									if (messageType === messageSync) {
-										const syncType = decoding.readUint8(decoder);
-										if (syncType === messageSyncUpdate || syncType === messageSyncStep2) {
-											const update = decoding.readVarUint8Array(decoder);
-											Y.applyUpdate(ydoc, update);
-										}
-									} else if (messageType === messageAwareness) {
-										const awarenessUpdate = decoding.readVarUint8Array(decoder);
-										awarenessProtocol.applyAwarenessUpdate(awareness, awarenessUpdate, null);
-									}
-								} catch (err) {
-									logger.error(
-										'Failed to apply catchup record',
-										{
-											room,
-											error: err instanceof Error ? err.message : String(err),
-										},
-										'CatchupError',
-									);
-								}
-							}
-						});
-
-						logger.debug(
-							'Catchup transaction completed',
-							{
-								room,
-								docChanged,
-								recordCount: currentSnapshotState.recordBuffer.length,
-							},
-							'CatchupComplete',
-						);
-
-						sendSyncMessages();
-					}
+					maybeCompleteCatchup(r.seqNum);
 					continue;
 				}
 
