@@ -1,3 +1,4 @@
+import type { Env } from './index';
 import { S2Logger } from './logger';
 
 export async function uploadSnapshot(
@@ -73,7 +74,7 @@ export async function retrieveSnapshot(
 	}
 
 	const arrayBuffer = await object.arrayBuffer();
-	const lastSeqNum = parseInt(object.customMetadata?.lastSeqNum || '0', 10);
+	const lastSeqNum = parseInt(object.customMetadata?.lastSeqNum ?? '0', 10);
 	return {
 		snapshot: new Uint8Array(arrayBuffer),
 		lastSeqNum,

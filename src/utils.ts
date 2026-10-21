@@ -1,4 +1,4 @@
-import { S2, AppendRecord, type ReadRecord } from '@s2-dev/streamstore';
+import { S2, AppendInput, AppendRecord, type ReadRecord } from '@s2-dev/streamstore';
 import { fromUint8Array } from 'js-base64';
 
 interface Config {
@@ -19,28 +19,12 @@ export function parseConfig(env: any): Config {
 	};
 }
 
-export function encodeBigEndian64(num: number): string {
-	const buffer = new ArrayBuffer(8);
-	const view = new DataView(buffer);
-	view.setBigUint64(0, BigInt(num), false);
-	const bytes = new Uint8Array(buffer);
-	return btoa(String.fromCharCode(...bytes));
-}
-
-export function decodeBigEndian64AsNumber(base64: string): number {
-	const binary = atob(base64);
-
-	if (binary.length !== 8) {
+export function decodeBigEndian64AsNumber(bytes: Uint8Array): number {
+	if (bytes.length !== 8) {
 		throw new Error('Invalid input length, must be 8 bytes');
 	}
 
-	const buffer = new ArrayBuffer(8);
-	const bytes = new Uint8Array(buffer);
-
-	for (let i = 0; i < 8; i++) {
-		bytes[i] = binary.charCodeAt(i);
-	}
-	const value = new DataView(buffer).getBigUint64(0, false);
+	const value = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(0, false);
 	return Number(value);
 }
 
@@ -65,7 +49,7 @@ export function isCommandType(record: ReadRecord<'bytes'>, type: CommandType): b
 	if (!header) {
 		return false;
 	}
-	return compareHeaderValue(header[0] as any, '') && compareHeaderValue(header[1] as any, type);
+	return compareHeaderValue(header[0], '') && compareHeaderValue(header[1], type);
 }
 
 export function isFenceCommand(record: ReadRecord<'bytes'>): boolean {
@@ -104,18 +88,20 @@ export class Room {
 
 	async acquireLease(newFencingToken: string, prevFencingToken: string) {
 		const stream = this.s2Client.basin(this.s2Basin).stream(this.streamName);
-		return await stream.append(AppendRecord.make(newFencingToken, [['', 'fence']]), { fencing_token: prevFencingToken });
+		return await stream.append(AppendInput.create([AppendRecord.fence(newFencingToken)], { fencingToken: prevFencingToken }));
 	}
 
 	async forceReleaseLease(currentFencingToken: string) {
 		const stream = this.s2Client.basin(this.s2Basin).stream(this.streamName);
-		return await stream.append(AppendRecord.make('', [['', 'fence']]), { fencing_token: currentFencingToken });
+		return await stream.append(AppendInput.create([AppendRecord.fence('')], { fencingToken: currentFencingToken }));
 	}
 
 	async releaseLease(trimSeqNum: number, prevFencingToken: string) {
 		const stream = this.s2Client.basin(this.s2Basin).stream(this.streamName);
-		return await stream.append([AppendRecord.make('', [['', 'fence']]), AppendRecord.make(encodeBigEndian64(trimSeqNum), [['', 'trim']])], {
-			fencing_token: prevFencingToken,
-		});
+		return await stream.append(
+			AppendInput.create([AppendRecord.fence(''), AppendRecord.trim(trimSeqNum)], {
+				fencingToken: prevFencingToken,
+			}),
+		);
 	}
 }

@@ -1,4 +1,4 @@
-import { S2, AppendRecord } from '@s2-dev/streamstore';
+import { S2, AppendInput, AppendRecord } from '@s2-dev/streamstore';
 
 export interface LogLevel {
 	DEBUG: 'debug';
@@ -125,7 +125,7 @@ export class S2Logger {
 		try {
 			const basin = this.s2Basin;
 			const stream = this.s2Client.basin(basin).stream(this.streamName);
-			await stream.append(AppendRecord.make(JSON.stringify(entry)));
+			await stream.append(AppendInput.create([AppendRecord.string({ body: JSON.stringify(entry) })]));
 		} catch (error) {
 			console.error('Failed to log to S2:', error);
 		}

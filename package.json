@@ -7,6 +7,7 @@
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
 		"test": "vitest",
+		"typecheck": "tsc --noEmit",
 		"cf-typegen": "wrangler types",
 		"format": "prettier --write \"src/**/*.{ts,js,json}\"",
 		"format:check": "prettier --check \"src/**/*.{ts,js,json}\"",
@@ -14,7 +15,7 @@
 		"lint:fix": "eslint src --ext .ts,.js --fix"
 	},
 	"devDependencies": {
-		"@cloudflare/vitest-pool-workers": "^0.8.19",
+		"@cloudflare/vitest-pool-workers": "^0.23.0",
 		"@types/node": "^24.3.0",
 		"@typescript-eslint/eslint-plugin": "^6.0.0",
 		"@typescript-eslint/parser": "^6.0.0",
@@ -23,14 +24,14 @@
 		"npm": "^11.5.2",
 		"prettier": "^3.0.0",
 		"typescript": "^5.5.2",
-		"vitest": "~3.2.0",
-		"wrangler": "^4.33.1"
+		"vitest": "~4.1.0",
+		"wrangler": "^4.151.3"
 	},
 	"dependencies": {
-		"@s2-dev/streamstore": "^0.18.1",
-		"js-base64": "^3.7.8",
-		"lib0": "^0.2.114",
-		"y-protocols": "^1.0.5",
-		"yjs": "^13.6.27"
+		"@s2-dev/streamstore": "^0.30.0",
+		"js-base64": "^3.9.4",
+		"lib0": "^0.2.119",
+		"y-protocols": "^1.0.7",
+		"yjs": "^13.6.33"
 	}
 }
