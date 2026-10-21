@@ -462,7 +462,10 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 							{ room: roomName, token: currentSnapshotState.currentFencingToken },
 							'FencingTokenError',
 						);
-						return false;
+						// A token we cannot read holds no valid lease. Treat it like a missing token so
+						// a connection can take over the lease (using this token as the expected one)
+						// instead of every connection waiting on it forever.
+						return true;
 					}
 				})();
 
