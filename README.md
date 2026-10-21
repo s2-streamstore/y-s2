@@ -46,6 +46,7 @@ S2_BASIN=your_s2_basin_name
 R2_BUCKET=your_r2_bucket_name
 LOG_MODE=CONSOLE|S2_SINGLE|S2_SHARED  # Optional
 SNAPSHOT_BACKLOG_SIZE=100             # Optional
+SNAPSHOT_BACKLOG_BYTES=8388608        # Optional
 ```
 
 ### Deployment

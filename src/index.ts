@@ -45,6 +45,8 @@ export interface Env {
 	LOG_MODE?: string;
 	// Size of the record backlog to trigger a snapshot
 	SNAPSHOT_BACKLOG_SIZE?: string;
+	// Total size in bytes of the record backlog to trigger a snapshot
+	SNAPSHOT_BACKLOG_BYTES?: string;
 	// Maximum age of a collected snapshot buffer before it is persisted to R2
 	BACKLOG_BUFFER_AGE?: number;
 	// Maximum batch size to reach before flushing to S2
@@ -117,7 +119,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 		const s2Client = new S2({ accessToken: env.S2_ACCESS_TOKEN });
 		const streamName = `rooms/${encodeURIComponent(roomName)}/index`;
 
-		const { maxBacklog, batchSize, lingerTime, leaseDuration, backlogBufferAge } = parseConfig(env);
+		const { maxBacklog, maxBacklogBytes, batchSize, lingerTime, leaseDuration, backlogBufferAge } = parseConfig(env);
 
 		const room = new Room(s2Client, streamName, env.S2_BASIN);
 
@@ -463,8 +465,8 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				if (isBlobPointer(r)) {
 					const resolved = await resolveBlobPointer(env, r);
 					if (!resolved) {
-						logger.error('Large message missing from R2, skipping record', { room: roomName, seqNum: r.seqNum }, 'BlobMissing');
-						continue;
+						// Skipping it would let this connection snapshot past an update it never applied, and trim it.
+						throw new Error(`Large message for record ${r.seqNum} is missing from R2`);
 					}
 					r = resolved;
 				}
@@ -517,8 +519,11 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				const backlogSize =
 					currentSnapshotState.trimSeqNum !== null ? currentSnapshotState.trimSeqNum + 1 - currentSnapshotState.lastProcessedTrimSeqNum : 0;
 
+				const backlogBytes = currentSnapshotState.recordBuffer.reduce((total, rec) => total + rec.body.length, 0);
+
 				const shouldSnapshot =
 					(backlogSize >= maxBacklog && leaseExpired) ||
+					(backlogBytes >= maxBacklogBytes && leaseExpired) ||
 					(firstRecordExpired && leaseExpired) ||
 					(currentSnapshotState.currentFencingToken && leaseExpired && backlogSize > 0);
 

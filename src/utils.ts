@@ -3,6 +3,7 @@ import { fromUint8Array } from 'js-base64';
 
 interface Config {
 	maxBacklog: number;
+	maxBacklogBytes: number;
 	batchSize: number;
 	lingerTime: number;
 	leaseDuration: number;
@@ -12,6 +13,7 @@ interface Config {
 export function parseConfig(env: any): Config {
 	return {
 		maxBacklog: env.SNAPSHOT_BACKLOG_SIZE ? parseInt(env.SNAPSHOT_BACKLOG_SIZE, 10) : 400,
+		maxBacklogBytes: env.SNAPSHOT_BACKLOG_BYTES ? parseInt(env.SNAPSHOT_BACKLOG_BYTES, 10) : 8 * 1024 * 1024,
 		batchSize: env.S2_BATCH_SIZE ? parseInt(env.S2_BATCH_SIZE, 10) : 8,
 		lingerTime: env.S2_LINGER_TIME ? parseInt(env.S2_LINGER_TIME, 10) : 50,
 		leaseDuration: env.LEASE_DURATION ? parseInt(env.LEASE_DURATION, 10) : 30,
