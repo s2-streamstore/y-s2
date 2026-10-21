@@ -1,5 +1,4 @@
-import { S2, AppendInput, AppendRecord, type ReadRecord } from '@s2-dev/streamstore';
-import { fromUint8Array } from 'js-base64';
+import { S2, AppendInput, AppendRecord, randomToken, type ReadRecord } from '@s2-dev/streamstore';
 
 interface Config {
 	maxBacklog: number;
@@ -83,9 +82,7 @@ export function parseFencingToken(token: string): { id: string; deadline: number
 
 export function generateDeadlineFencingToken(leaseDuration: number): string {
 	const newDeadline = Math.floor(Date.now() / 1000 + leaseDuration);
-	const id = crypto.getRandomValues(new Uint8Array(12));
-	const idBase64 = fromUint8Array(id);
-	return `${idBase64} ${newDeadline}`;
+	return `${randomToken(12)} ${newDeadline}`;
 }
 
 export class Room {

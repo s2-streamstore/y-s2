@@ -20,8 +20,6 @@
 		"@typescript-eslint/eslint-plugin": "^6.0.0",
 		"@typescript-eslint/parser": "^6.0.0",
 		"eslint": "^8.0.0",
-		"install": "^0.13.0",
-		"npm": "^11.5.2",
 		"prettier": "^3.0.0",
 		"typescript": "^5.5.2",
 		"vitest": "~4.1.0",
@@ -29,7 +27,6 @@
 	},
 	"dependencies": {
 		"@s2-dev/streamstore": "^0.30.0",
-		"js-base64": "^3.9.4",
 		"lib0": "^0.2.119",
 		"y-protocols": "^1.0.7",
 		"yjs": "^13.6.33"
