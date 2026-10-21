@@ -27,7 +27,7 @@ export interface LogEntry {
 	cfRequestId?: string;
 }
 
-enum LogMode {
+export enum LogMode {
 	CONSOLE = 'CONSOLE',
 	S2_SINGLE = 'S2_SINGLE',
 	S2_SHARED = 'S2_SHARED',
@@ -172,8 +172,21 @@ export class S2Logger {
 	}
 }
 
+// Case-insensitive; unset or unknown values fall back to CONSOLE rather than an S2 mode that may not be configured.
+export function parseLogMode(value: string | undefined): LogMode {
+	const normalized = value?.trim().toUpperCase();
+	if (!normalized) {
+		return LogMode.CONSOLE;
+	}
+	if (Object.values(LogMode).includes(normalized as LogMode)) {
+		return normalized as LogMode;
+	}
+	console.warn(`Unknown LOG_MODE "${value}", falling back to ${LogMode.CONSOLE}`);
+	return LogMode.CONSOLE;
+}
+
 export function createLogger(env: { S2_ACCESS_TOKEN?: string; S2_BASIN?: string; LOG_MODE?: string }, request?: Request): S2Logger {
-	const logMode = (env.LOG_MODE ?? 'CONSOLE') as LogMode;
+	const logMode = parseLogMode(env.LOG_MODE);
 
 	return new S2Logger({
 		s2Client: logMode !== LogMode.CONSOLE && env.S2_ACCESS_TOKEN ? new S2({ accessToken: env.S2_ACCESS_TOKEN }) : undefined,
