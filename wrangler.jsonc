@@ -30,6 +30,7 @@
 	 *                              wrangler secret put S2_BASIN	 
 	 */
 	"vars": { "ENVIRONMENT": "production" },
+	"limits": { "subrequests": 1000000 },
 	/**
 	 * R2 Buckets
 	 * Replace "test" with your actual bucket name for local development	 
