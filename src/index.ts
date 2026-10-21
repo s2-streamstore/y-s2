@@ -174,6 +174,22 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 		// Aborted when the client disconnects, so the read loop (and its snapshotting) stops with it.
 		const readAbort = new AbortController();
 
+		// If S2 stops accepting this connection's appends or delivering the room's records, close the
+		// socket rather than keep a connection that silently drops the client's edits or goes stale.
+		// The client reconnects and resyncs, which re-sends any updates that were not persisted.
+		const failConnection = (reason: string): void => {
+			if (readAbort.signal.aborted) {
+				return;
+			}
+			readAbort.abort();
+			logger.warn('Closing connection after S2 failure', { room: roomName, reason }, 'ConnectionFailed');
+			try {
+				server.close(1011, reason);
+			} catch {
+				// Already closing.
+			}
+		};
+
 		logger.info(
 			'Starting catchup from S2',
 			{
@@ -200,6 +216,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					},
 					'AppendPipelineError',
 				);
+				failConnection('S2 append failed');
 			})
 			.finally(() => {
 				appendSession.close().catch((error: unknown) => {
@@ -514,6 +531,8 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					'StreamReadFailure',
 				);
 			}
+			// Reading only stops for good when the client disconnected (a no-op then) or on failure.
+			failConnection('S2 read failed');
 		})();
 
 		server.addEventListener('message', async (event: MessageEvent) => {
@@ -575,6 +594,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 						},
 						'BatcherSubmitError',
 					);
+					failConnection('S2 append failed');
 				});
 			} catch (err) {
 				logger.error(
