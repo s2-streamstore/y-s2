@@ -164,6 +164,8 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 		let { catchupSeqNum, snapshotState } = await initializeFromSnapshot();
 
 		const stream = s2Client.basin(env.S2_BASIN).stream(streamName);
+		// Aborted when the client disconnects, so the read loop (and its snapshotting) stops with it.
+		const readAbort = new AbortController();
 		const tailResponse = await stream.checkTail();
 
 		const tailSeqNum = tailResponse.tail.seqNum;
@@ -235,11 +237,15 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 						{
 							start: { from: { seqNum: currentCatchupSeqNum }, clamp: true },
 						},
-						{ as: 'bytes' },
+						{ as: 'bytes', signal: readAbort.signal },
 					);
 
 					return await processEventStream(session, currentCatchupSeqNum, currentSnapshotState);
 				} catch (err) {
+					// The client disconnected and the read session was aborted.
+					if (readAbort.signal.aborted) {
+						return;
+					}
 					if (err instanceof RangeNotSatisfiableError) {
 						logger.warn(
 							'RangeNotSatisfiableError received - sequence number out of range',
@@ -583,6 +589,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 		});
 
 		server.addEventListener('close', async () => {
+			readAbort.abort();
 			logger.info(
 				'WebSocket connection closed',
 				{
