@@ -1,11 +1,4 @@
-import {
-	BatchTransform,
-	FencingTokenMismatchError,
-	S2,
-	RangeNotSatisfiableError,
-	AppendRecord,
-	type ReadSession,
-} from '@s2-dev/streamstore';
+import { BatchTransform, FencingTokenMismatchError, S2, RangeNotSatisfiableError, type ReadSession } from '@s2-dev/streamstore';
 import * as Y from 'yjs';
 import * as decoding from 'lib0/decoding';
 import * as awarenessProtocol from 'y-protocols/awareness';
@@ -25,6 +18,7 @@ import {
 	messageSyncStep2,
 	messageSyncUpdate,
 } from './protocol.js';
+import { isBlobPointer, resolveBlobPointer, toAppendRecord } from './blob.js';
 import { retrieveSnapshot, uploadSnapshot, getSnapshotETag } from './snapshot.js';
 import {
 	decodeBigEndian64AsNumber,
@@ -209,6 +203,12 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			lingerDurationMillis: lingerTime,
 		});
 		const batchWriter = batchTransform.writable.getWriter();
+		// Appends go through one chain so they reach the stream in the order the client sent them, even
+		// when a large message first has to be stored in R2.
+		let pendingWrites: Promise<void> = Promise.resolve();
+		const appendMessage = (message: Uint8Array, onError: (err: unknown) => void): void => {
+			pendingWrites = pendingWrites.then(async () => batchWriter.write(await toAppendRecord(env, roomName, message))).catch(onError);
+		};
 		const appendPipeline = batchTransform.readable.pipeTo(appendSession.writable);
 		appendPipeline
 			.catch((error: unknown) => {
@@ -416,7 +416,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				},
 			);
 
-			for await (const r of session) {
+			for await (let r of session) {
 				currentSnapshotState.trimSeqNum = r.seqNum;
 
 				if (isFenceCommand(r)) {
@@ -458,6 +458,15 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 						);
 					}
 					continue;
+				}
+
+				if (isBlobPointer(r)) {
+					const resolved = await resolveBlobPointer(env, r);
+					if (!resolved) {
+						logger.error('Large message missing from R2, skipping record', { room: roomName, seqNum: r.seqNum }, 'BlobMissing');
+						continue;
+					}
+					r = resolved;
 				}
 
 				// Track awareness clocks before the record can reach the client, so its echo is recognized.
@@ -602,12 +611,12 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 						return;
 					}
 				}
-				batchWriter.write(AppendRecord.bytes({ body: buffer })).catch((err: Error) => {
+				appendMessage(buffer, (err) => {
 					logger.error(
 						'Failed to submit message to batcher',
 						{
 							room: roomName,
-							error: err.message,
+							error: err instanceof Error ? err.message : String(err),
 						},
 						'BatcherSubmitError',
 					);
@@ -639,13 +648,13 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			if (userState.awarenessId !== null) {
 				try {
 					const disconnectMessage = encodeAwarenessUserDisconnected(userState.awarenessId, userState.awarenessLastClock);
-					batchWriter.write(AppendRecord.bytes({ body: disconnectMessage })).catch((err: Error) => {
+					appendMessage(disconnectMessage, (err) => {
 						logger.error(
 							'Failed to submit disconnect message',
 							{
 								room: roomName,
 								userId: userState.awarenessId,
-								error: err.message,
+								error: err instanceof Error ? err.message : String(err),
 							},
 							'DisconnectSubmitError',
 						);
@@ -671,16 +680,19 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					);
 				}
 			}
-			batchWriter.close().catch((err: Error) => {
-				logger.error(
-					'Failed to close batch writer',
-					{
-						room: roomName,
-						error: err.message,
-					},
-					'BatchWriterCloseError',
-				);
-			});
+			// Close only after pending writes (e.g. a large message still being stored) have been submitted.
+			pendingWrites
+				.then(() => batchWriter.close())
+				.catch((err: Error) => {
+					logger.error(
+						'Failed to close batch writer',
+						{
+							room: roomName,
+							error: err.message,
+						},
+						'BatchWriterCloseError',
+					);
+				});
 		});
 
 		return new Response(null, {
