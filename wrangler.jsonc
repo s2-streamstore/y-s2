@@ -31,6 +31,15 @@
 	 */
 	"vars": { "ENVIRONMENT": "production" },
 	/**
+	 * Each WebSocket connection is a single invocation for as long as the client stays connected, and
+	 * every S2 append/read and R2 call it makes counts toward the per-invocation subrequest limit
+	 * (10,000 by default on paid plans). A client typing steadily uses ~300 subrequests per minute,
+	 * which would exhaust the default in about half an hour. 1,000,000 covers ~2 days of continuous
+	 * typing; past that the connection is closed and the client reconnects with a fresh budget.
+	 * https://developers.cloudflare.com/workers/platform/limits/#subrequests
+	 */
+	"limits": { "subrequests": 1000000 },
+	/**
 	 * R2 Buckets
 	 * Replace "test" with your actual bucket name for local development	 
 	 */
