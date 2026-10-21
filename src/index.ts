@@ -1,4 +1,11 @@
-import { BatchTransform, S2, RangeNotSatisfiableError, AppendRecord, type ReadRecord } from '@s2-dev/streamstore';
+import {
+	BatchTransform,
+	FencingTokenMismatchError,
+	S2,
+	RangeNotSatisfiableError,
+	AppendRecord,
+	type ReadRecord,
+} from '@s2-dev/streamstore';
 import * as Y from 'yjs';
 import * as decoding from 'lib0/decoding';
 import * as awarenessProtocol from 'y-protocols/awareness';
@@ -409,9 +416,9 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					if (r.seqNum > currentSnapshotState.lastProcessedFenceSeqNum) {
 						currentSnapshotState.currentFencingToken = new TextDecoder().decode(r.body);
 						currentSnapshotState.lastProcessedFenceSeqNum = r.seqNum;
-						if (r.body.length === 0) {
-							currentSnapshotState.blocked = false;
-						}
+						// Any new fence settles an in-flight lease race (acquired, released, or lost to
+						// another connection), so the lease deadline alone gates the next attempt.
+						currentSnapshotState.blocked = false;
 						logger.debug(
 							'Received fencing token',
 							{
@@ -493,6 +500,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
 				currentSnapshotState.blocked = true;
 
+				const blockedState = currentSnapshotState;
 				takeSnapshot(
 					env,
 					leaseDuration,
@@ -500,6 +508,9 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					{ ...currentSnapshotState, recordBuffer: [...currentSnapshotState.recordBuffer] },
 					room,
 					logger,
+					() => {
+						blockedState.blocked = false;
+					},
 				);
 			}
 		};
@@ -717,16 +728,26 @@ async function takeSnapshot(
 	snapshotStateCopy: SnapshotState,
 	room: Room,
 	logger: S2Logger,
+	unblock: () => void,
 ): Promise<void> {
 	const newFencingToken = generateDeadlineFencingToken(leaseDuration);
-	const currentETag = await getSnapshotETag(env, roomName, logger);
+	let currentETag: string | null;
 
 	try {
+		currentETag = await getSnapshotETag(env, roomName, logger);
 		await room.acquireLease(newFencingToken, snapshotStateCopy.currentFencingToken);
 	} catch (err) {
+		if (err instanceof FencingTokenMismatchError) {
+			// Another connection won the race; reading its fence record unblocks us.
+			logger.debug('Lease held by another connection, skipping snapshot', { roomName }, 'LeaseContention');
+			return;
+		}
 		logger.error('Lease acquisition failed, skipping snapshot', { roomName, error: err }, 'LeaseAcquisitionError');
+		unblock();
 		return;
 	}
+
+	let released = false;
 
 	try {
 		const snapshot = await retrieveSnapshot(env, roomName, logger);
@@ -781,6 +802,7 @@ async function takeSnapshot(
 		ydoc.destroy();
 
 		await room.releaseLease(snapshotStateCopy.trimSeqNum!, newFencingToken);
+		released = true;
 
 		logger.info('Snapshot completed successfully', {
 			roomName,
@@ -790,10 +812,12 @@ async function takeSnapshot(
 	} catch (err) {
 		logger.error('Snapshot failed after acquiring lease', { roomName, error: err });
 	} finally {
-		try {
-			await room.forceReleaseLease(newFencingToken);
-		} catch (err) {
-			logger.error('Failed to release lease', { roomName, error: err });
+		if (!released) {
+			try {
+				await room.forceReleaseLease(newFencingToken);
+			} catch (err) {
+				logger.error('Failed to release lease', { roomName, error: err });
+			}
 		}
 	}
 }
