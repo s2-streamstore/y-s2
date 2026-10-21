@@ -1,5 +1,6 @@
 import { AppendRecord, type ReadRecord } from '@s2-dev/streamstore';
 import { describe, expect, it } from 'vitest';
+import { LogMode, parseLogMode } from '../src/logger';
 import { decodeBigEndian64AsNumber, generateDeadlineFencingToken, isFenceCommand, isTrimCommand, parseFencingToken } from '../src/utils';
 
 // Simulates reading back an appended record with `as: 'bytes'`.
@@ -64,5 +65,19 @@ describe('fencing tokens', () => {
 		for (const token of ['abc not-a-deadline', 'abc', 'abc ', '']) {
 			expect(() => parseFencingToken(token)).toThrow('Invalid fencing token format');
 		}
+	});
+});
+
+describe('LOG_MODE parsing', () => {
+	it('accepts any casing and surrounding whitespace', () => {
+		expect(parseLogMode('console')).toBe(LogMode.CONSOLE);
+		expect(parseLogMode(' s2_single ')).toBe(LogMode.S2_SINGLE);
+		expect(parseLogMode('S2_Shared')).toBe(LogMode.S2_SHARED);
+	});
+
+	it('falls back to CONSOLE when unset or unknown', () => {
+		expect(parseLogMode(undefined)).toBe(LogMode.CONSOLE);
+		expect(parseLogMode('')).toBe(LogMode.CONSOLE);
+		expect(parseLogMode('CONSLE')).toBe(LogMode.CONSOLE);
 	});
 });
