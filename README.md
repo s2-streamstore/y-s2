@@ -34,20 +34,32 @@ Y-S2 is a Cloudflare Worker that provides real-time collaborative document editi
 
 ### Prerequisites
 
-- Cloudflare account with Workers enabled.
+- Cloudflare account on the Workers Paid plan (each WebSocket connection is one Worker invocation, and the free plan allows only 50 subrequests per invocation).
 - S2.dev account, a basin with `Create stream on append/read` enabled, and a scoped access token to the basin you want to use.
 - R2 bucket for snapshot storage.
 
-### Environment Variables
+### Configuration
+
+Set the S2 credentials as Worker secrets, and point the `R2_BUCKET` binding in `wrangler.jsonc` at your bucket (`bucket_name`):
 
 ```bash
-S2_ACCESS_TOKEN=your_s2_access_token
-S2_BASIN=your_s2_basin_name
-R2_BUCKET=your_r2_bucket_name
-LOG_MODE=CONSOLE|S2_SINGLE|S2_SHARED  # Optional
-SNAPSHOT_BACKLOG_SIZE=100             # Optional
-SNAPSHOT_BACKLOG_BYTES=8388608        # Optional
+npx wrangler secret put S2_ACCESS_TOKEN
+npx wrangler secret put S2_BASIN
 ```
+
+Optional variables (under `vars` in `wrangler.jsonc`, or in `.dev.vars` locally):
+
+| Variable                 | Default   | Description                                                                 |
+| ------------------------ | --------- | --------------------------------------------------------------------------- |
+| `LOG_MODE`               | `CONSOLE` | `CONSOLE`, `S2_SINGLE` (one log stream per connection) or `S2_SHARED`        |
+| `SNAPSHOT_BACKLOG_SIZE`  | `400`     | Records since the last snapshot that trigger a new one                      |
+| `SNAPSHOT_BACKLOG_BYTES` | `8388608` | Bytes since the last snapshot that trigger a new one                        |
+| `BACKLOG_BUFFER_AGE`     | `60000`   | Milliseconds after the oldest unsnapshotted record before a snapshot        |
+| `LEASE_DURATION`         | `30`      | Seconds a connection holds the snapshot lease                               |
+| `S2_BATCH_SIZE`          | `8`       | Maximum records per append batch                                            |
+| `S2_LINGER_TIME`         | `50`      | Milliseconds to wait for more records before sending an append batch        |
+
+Set the basin's default stream retention to infinite: snapshots are only taken while a room is active, so updates that expire from the stream before a snapshot covers them are lost.
 
 ### Deployment
 
@@ -78,18 +90,20 @@ Every push to `main` is checked (lint, format, typecheck, tests, build) and depl
 
 ### Client Integration
 
-Connect to the deployed worker using the Yjs WebSocket provider:
+Connect with the Yjs WebSocket provider. The server URL ends in `/ws`, and the room is passed both as the room name and as the `room` parameter:
 
 ```javascript
 import * as Y from 'yjs'
 import { WebsocketProvider } from 'y-websocket'
 
+const room = 'room-name'
 const doc = new Y.Doc()
-const provider = new WebsocketProvider('wss://your-worker.your-subdomain.workers.dev', 'room-name', doc, {
-  params: { authToken: 'your-auth-token' }
+const provider = new WebsocketProvider('wss://your-worker.your-subdomain.workers.dev/ws', room, doc, {
+  params: { room, yauth: 'your-auth-token' },
 })
-
 ```
+
+Clients are not authenticated yet: any non-empty `yauth` is accepted (see #4).
 
 ### Credits
 
