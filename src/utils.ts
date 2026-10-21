@@ -19,17 +19,6 @@ export function parseConfig(env: any): Config {
 	};
 }
 
-export function createS2Client(env: { S2_ACCESS_TOKEN: string; S2_ACCOUNT_ENDPOINT?: string; S2_BASIN_ENDPOINT?: string }): S2 {
-	// Unset (or empty) endpoints fall back to the SDK defaults.
-	return new S2({
-		accessToken: env.S2_ACCESS_TOKEN,
-		endpoints: {
-			account: env.S2_ACCOUNT_ENDPOINT ? env.S2_ACCOUNT_ENDPOINT : undefined,
-			basin: env.S2_BASIN_ENDPOINT ? env.S2_BASIN_ENDPOINT : undefined,
-		},
-	});
-}
-
 export function decodeBigEndian64AsNumber(bytes: Uint8Array): number {
 	if (bytes.length !== 8) {
 		throw new Error('Invalid input length, must be 8 bytes');

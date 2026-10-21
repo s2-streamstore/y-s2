@@ -46,26 +46,6 @@ S2_BASIN=your_s2_basin_name
 R2_BUCKET=your_r2_bucket_name
 LOG_MODE=CONSOLE|S2_SINGLE|S2_SHARED  # Optional
 SNAPSHOT_BACKLOG_SIZE=100             # Optional
-S2_ACCOUNT_ENDPOINT=                  # Optional, e.g. http://localhost:8080 for s2-lite
-S2_BASIN_ENDPOINT=                    # Optional, e.g. http://localhost:8080 for s2-lite
-```
-
-### Local development with s2-lite
-
-Run [s2-lite](https://s2.dev/docs/lite) with a basin that creates streams on append/read, and point the worker at it via `.dev.vars`:
-
-```bash
-echo '{"basins":[{"name":"y-s2-local","config":{"create_stream_on_append":true,"create_stream_on_read":true}}]}' > lite-init.json
-s2 lite --port 8080 --init-file lite-init.json
-
-cat > .dev.vars <<EOF
-S2_ACCESS_TOKEN=ignored
-S2_BASIN=y-s2-local
-S2_ACCOUNT_ENDPOINT=http://localhost:8080
-S2_BASIN_ENDPOINT=http://localhost:8080
-LOG_MODE=CONSOLE
-EOF
-npm run dev
 ```
 
 ### Deployment
