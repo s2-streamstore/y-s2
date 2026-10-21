@@ -1,4 +1,4 @@
-import { S2, AppendInput, AppendRecord } from '@s2-dev/streamstore';
+import { S2, AppendRecord, BatchTransform, MAX_APPEND_BYTES } from '@s2-dev/streamstore';
 
 export interface LogLevel {
 	DEBUG: 'debug';
@@ -47,6 +47,8 @@ export class S2Logger {
 	private s2Client?: S2;
 	private s2Basin?: string;
 	private streamName?: string;
+	// Log records are batched through one append session instead of one append (and subrequest) per entry.
+	private logWriter?: WritableStreamDefaultWriter<AppendRecord>;
 	private workerId: string;
 	private minLevel: LogLevelType;
 	private cfRay?: string;
@@ -104,7 +106,28 @@ export class S2Logger {
 		};
 	}
 
-	private async logEntry(entry: LogEntry): Promise<void> {
+	private getLogWriter(s2Client: S2, basin: string, streamName: string): WritableStreamDefaultWriter<AppendRecord> {
+		if (!this.logWriter) {
+			const batcher = new BatchTransform({ lingerDurationMillis: 100 });
+			const writer = batcher.writable.getWriter();
+			this.logWriter = writer;
+			s2Client
+				.basin(basin)
+				.stream(streamName)
+				.appendSession()
+				.then((session) => batcher.readable.pipeTo(session.writable))
+				.catch((error: unknown) => {
+					console.error('Failed to log to S2:', error);
+					// Start a new session for the next entry rather than staying broken.
+					if (this.logWriter === writer) {
+						this.logWriter = undefined;
+					}
+				});
+		}
+		return this.logWriter;
+	}
+
+	private logEntry(entry: LogEntry): void {
 		if (this.logMode === LogMode.CONSOLE) {
 			const timestamp = new Date(entry.timestamp).toISOString();
 			const prefix = `[${timestamp}] ${entry.level.toUpperCase()} [${entry.workerId}]`;
@@ -122,13 +145,16 @@ export class S2Logger {
 			return;
 		}
 
-		try {
-			const basin = this.s2Basin;
-			const stream = this.s2Client.basin(basin).stream(this.streamName);
-			await stream.append(AppendInput.create([AppendRecord.string({ body: JSON.stringify(entry) })]));
-		} catch (error) {
-			console.error('Failed to log to S2:', error);
+		const record = AppendRecord.string({ body: JSON.stringify(entry) });
+		if (record.meteredBytes > MAX_APPEND_BYTES) {
+			console.error('Log entry too large for S2, skipping', entry.message);
+			return;
 		}
+		this.getLogWriter(this.s2Client, this.s2Basin, this.streamName)
+			.write(record)
+			.catch((error: unknown) => {
+				console.error('Failed to log to S2:', error);
+			});
 	}
 
 	debug(message: string, data?: any, source?: string): void {
