@@ -62,7 +62,7 @@ export function isTrimCommand(record: ReadRecord<'bytes'>): boolean {
 
 export function parseFencingToken(token: string): { id: string; deadline: number } {
 	const [id, deadline] = token.split(' ');
-	if (!id || !deadline) {
+	if (!id || !deadline || !Number.isFinite(Number(deadline))) {
 		throw new Error(`Invalid fencing token format: ${token}`);
 	}
 	return { id, deadline: Number(deadline) };
