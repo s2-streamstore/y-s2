@@ -21,6 +21,17 @@ export function parseConfig(env: any): Config {
 	};
 }
 
+// Thrown when a read skips past records `from` (inclusive) to `to` (exclusive). Sequence numbers are
+// contiguous, so the stream was trimmed past them before this connection read them.
+export class MissingRecordsError extends Error {
+	constructor(
+		readonly from: number,
+		readonly to: number,
+	) {
+		super(`Records ${from}..${to - 1} are no longer in the stream`);
+	}
+}
+
 export function decodeBigEndian64AsNumber(bytes: Uint8Array): number {
 	if (bytes.length !== 8) {
 		throw new Error('Invalid input length, must be 8 bytes');

@@ -1,4 +1,4 @@
-import { BatchTransform, FencingTokenMismatchError, S2, RangeNotSatisfiableError, type ReadSession } from '@s2-dev/streamstore';
+import { BatchTransform, FencingTokenMismatchError, S2, type ReadSession } from '@s2-dev/streamstore';
 import * as Y from 'yjs';
 import * as decoding from 'lib0/decoding';
 import * as awarenessProtocol from 'y-protocols/awareness';
@@ -25,6 +25,7 @@ import {
 	generateDeadlineFencingToken,
 	isFenceCommand,
 	isTrimCommand,
+	MissingRecordsError,
 	parseConfig,
 	parseFencingToken,
 	Room,
@@ -237,7 +238,9 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				});
 			});
 
+		let syncSent = false;
 		const sendSyncMessages = (): void => {
+			syncSent = true;
 			server.send(encodeSyncStep1(Y.encodeStateVector(ydoc)));
 			server.send(encodeSyncStep2(Y.encodeStateAsUpdate(ydoc)));
 
@@ -252,6 +255,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 		const readStreamWithRetry = async (): Promise<void> => {
 			let currentCatchupSeqNum = catchupSeqNum;
 			let currentSnapshotState = snapshotState;
+			let acceptGaps = false;
 			let attempts = 0;
 			const maxAttempts = 3;
 
@@ -270,56 +274,36 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 						{ as: 'bytes', signal: readAbort.signal },
 					);
 
-					return await processEventStream(session, currentCatchupSeqNum, currentSnapshotState);
+					return await processEventStream(session, currentCatchupSeqNum, currentSnapshotState, acceptGaps);
 				} catch (err) {
 					// The client disconnected and the read session was aborted.
 					if (readAbort.signal.aborted) {
 						return;
 					}
-					if (err instanceof RangeNotSatisfiableError) {
-						logger.warn(
-							'RangeNotSatisfiableError received - sequence number out of range',
-							{
-								room: roomName,
-								requestedSeqNum: currentCatchupSeqNum,
-								error: err instanceof Error ? err.message : String(err),
-								attempt: attempts,
-							},
-							'RangeNotSatisfiableError',
-						);
-
-						// Re-fetch tail to get current sequence number
-						const currentTail = await stream.checkTail();
-						const actualTailSeqNum = currentTail.tail.seqNum;
-
-						if (currentCatchupSeqNum < actualTailSeqNum) {
+					if (err instanceof MissingRecordsError && !syncSent) {
+						// Still catching up: the snapshot this connection loaded is older than the stream's trim point,
+						// i.e. another connection snapshotted and trimmed meanwhile. Reload and start over from there.
+						const newState = await initializeFromSnapshot();
+						if (newState.catchupSeqNum > currentCatchupSeqNum) {
 							logger.info(
-								'Stale state from R2 - restarting from fresh snapshot',
-								{
-									room: roomName,
-									requestedSeqNum: currentCatchupSeqNum,
-									tailSeqNum: actualTailSeqNum,
-									attempt: attempts,
-								},
+								'Stream was trimmed during catchup, restarting from the newer snapshot',
+								{ room: roomName, from: err.from, to: err.to, catchupSeqNum: newState.catchupSeqNum },
 								'RestartFromSnapshot',
 							);
-
-							const newState = await initializeFromSnapshot();
-							currentCatchupSeqNum = newState.catchupSeqNum;
-							currentSnapshotState = newState.snapshotState;
-							catchupSeqNum = currentCatchupSeqNum;
-							snapshotState = currentSnapshotState;
-
-							continue;
 						} else {
-							logger.warn('RangeNotSatisfiableError for sequence number higher than tail - not restarting', {
-								room: roomName,
-								requestedSeqNum: currentCatchupSeqNum,
-								tailSeqNum: actualTailSeqNum,
-								attempt: attempts,
-							});
-							throw err;
+							// No snapshot covers them (e.g. they expired by retention): continue with what the stream has.
+							logger.error(
+								'Records missing from both the stream and snapshots',
+								{ room: roomName, from: err.from, to: err.to },
+								'RecordsLost',
+							);
+							acceptGaps = true;
 						}
+						currentCatchupSeqNum = newState.catchupSeqNum;
+						currentSnapshotState = newState.snapshotState;
+						catchupSeqNum = currentCatchupSeqNum;
+						snapshotState = currentSnapshotState;
+						continue;
 					} else {
 						logger.error(
 							'S2 stream read error',
@@ -342,14 +326,21 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			session: ReadSession<'bytes'>,
 			currentCatchupSeqNum: number,
 			currentSnapshotState: SnapshotState,
+			acceptGaps: boolean,
 		): Promise<void> => {
 			let isCatchingUp = true;
+			// Cleared when this session is abandoned (e.g. restarted from a newer snapshot), so a late
+			// catchup completion cannot send its stale document.
+			let active = true;
 
 			// Resolves once the loop below has consumed every record up to the stream's tail, command
 			// records included (the stream commonly ends with fence/trim records after a snapshot).
 			// Records read until then are buffered and applied in one transaction.
 			session.caughtUp().then(
 				(tail) => {
+					if (!active) {
+						return;
+					}
 					isCatchingUp = false;
 					logger.info(
 						'Catchup completed, processing records',
@@ -401,6 +392,11 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 						}
 					});
 
+					// Trims seen while catching up were deferred until the buffer was applied.
+					currentSnapshotState.recordBuffer = currentSnapshotState.recordBuffer.filter(
+						(rec) => rec.seqNum > currentSnapshotState.lastProcessedTrimSeqNum,
+					);
+
 					logger.debug(
 						'Catchup transaction completed',
 						{
@@ -418,133 +414,149 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				},
 			);
 
-			for await (let r of session) {
-				currentSnapshotState.trimSeqNum = r.seqNum;
-
-				if (isFenceCommand(r)) {
-					if (r.seqNum > currentSnapshotState.lastProcessedFenceSeqNum) {
-						currentSnapshotState.currentFencingToken = new TextDecoder().decode(r.body);
-						currentSnapshotState.lastProcessedFenceSeqNum = r.seqNum;
-						// Any new fence settles an in-flight lease race (acquired, released, or lost to
-						// another connection), so the lease deadline alone gates the next attempt.
-						currentSnapshotState.blocked = false;
-						logger.debug(
-							'Received fencing token',
-							{
-								room: roomName,
-								fencingToken: currentSnapshotState.currentFencingToken,
-							},
-							'FencingToken',
-						);
+			let nextSeqNum = currentCatchupSeqNum;
+			try {
+				for await (let r of session) {
+					// Sequence numbers are contiguous: a jump means records were trimmed before we read them.
+					if (r.seqNum > nextSeqNum && !acceptGaps) {
+						throw new MissingRecordsError(nextSeqNum, r.seqNum);
 					}
-					continue;
-				}
+					nextSeqNum = r.seqNum + 1;
+					currentSnapshotState.trimSeqNum = r.seqNum;
 
-				if (r.body.length === 0) {
-					continue;
-				}
-
-				if (isTrimCommand(r)) {
-					const trimSeqNum = decodeBigEndian64AsNumber(r.body);
-					if (trimSeqNum > currentSnapshotState.lastProcessedTrimSeqNum) {
-						currentSnapshotState.firstRecordAge = null;
-						currentSnapshotState.lastProcessedTrimSeqNum = trimSeqNum;
-						currentSnapshotState.recordBuffer = currentSnapshotState.recordBuffer.filter((rec) => rec.seqNum > trimSeqNum);
-						logger.debug(
-							'Received trim command',
-							{
-								room: roomName,
-								seqNum: trimSeqNum,
-							},
-							'TrimCommand',
-						);
+					if (isFenceCommand(r)) {
+						if (r.seqNum > currentSnapshotState.lastProcessedFenceSeqNum) {
+							currentSnapshotState.currentFencingToken = new TextDecoder().decode(r.body);
+							currentSnapshotState.lastProcessedFenceSeqNum = r.seqNum;
+							// Any new fence settles an in-flight lease race (acquired, released, or lost to
+							// another connection), so the lease deadline alone gates the next attempt.
+							currentSnapshotState.blocked = false;
+							logger.debug(
+								'Received fencing token',
+								{
+									room: roomName,
+									fencingToken: currentSnapshotState.currentFencingToken,
+								},
+								'FencingToken',
+							);
+						}
+						continue;
 					}
-					continue;
-				}
 
-				if (isBlobPointer(r)) {
-					const resolved = await resolveBlobPointer(env, r);
-					if (!resolved) {
-						// Skipping it would let this connection snapshot past an update it never applied, and trim it.
-						throw new Error(`Large message for record ${r.seqNum} is missing from R2`);
+					if (r.body.length === 0) {
+						continue;
 					}
-					r = resolved;
-				}
 
-				// Track awareness clocks before the record can reach the client, so its echo is recognized.
-				if (r.body[0] === messageAwareness) {
-					try {
-						awarenessClocks.observe(decodeAwarenessMessage(r.body));
-					} catch {
-						// Malformed awareness record: nothing to track.
+					if (isTrimCommand(r)) {
+						const trimSeqNum = decodeBigEndian64AsNumber(r.body);
+						if (trimSeqNum > currentSnapshotState.lastProcessedTrimSeqNum) {
+							currentSnapshotState.firstRecordAge = null;
+							currentSnapshotState.lastProcessedTrimSeqNum = trimSeqNum;
+							// While catching up, buffered records are not applied yet (this connection's document comes
+							// from an older snapshot), so they are dropped only once catchup has applied them.
+							if (!isCatchingUp) {
+								currentSnapshotState.recordBuffer = currentSnapshotState.recordBuffer.filter((rec) => rec.seqNum > trimSeqNum);
+							}
+							logger.debug(
+								'Received trim command',
+								{
+									room: roomName,
+									seqNum: trimSeqNum,
+								},
+								'TrimCommand',
+							);
+						}
+						continue;
 					}
-				}
 
-				currentSnapshotState.recordBuffer.push(r);
-
-				if (currentSnapshotState.firstRecordAge === null) {
-					currentSnapshotState.firstRecordAge = r.timestamp.getTime();
-				}
-
-				if (isCatchingUp) {
-					continue;
-				}
-
-				const recordBytes = r.body;
-				server.send(recordBytes);
-
-				const leaseExpired = (() => {
-					if (!currentSnapshotState.currentFencingToken) {
-						return true;
+					if (isBlobPointer(r)) {
+						const resolved = await resolveBlobPointer(env, r);
+						if (!resolved) {
+							// Skipping it would let this connection snapshot past an update it never applied, and trim it.
+							throw new Error(`Large message for record ${r.seqNum} is missing from R2`);
+						}
+						r = resolved;
 					}
-					try {
-						const { deadline } = parseFencingToken(currentSnapshotState.currentFencingToken);
-						return Date.now() > deadline * 1000;
-					} catch {
-						logger.error(
-							'Invalid fencing token format',
-							{ room: roomName, token: currentSnapshotState.currentFencingToken },
-							'FencingTokenError',
-						);
-						// A token we cannot read holds no valid lease. Treat it like a missing token so
-						// a connection can take over the lease (using this token as the expected one)
-						// instead of every connection waiting on it forever.
-						return true;
+
+					// Track awareness clocks before the record can reach the client, so its echo is recognized.
+					if (r.body[0] === messageAwareness) {
+						try {
+							awarenessClocks.observe(decodeAwarenessMessage(r.body));
+						} catch {
+							// Malformed awareness record: nothing to track.
+						}
 					}
-				})();
 
-				const firstRecordExpired =
-					currentSnapshotState.firstRecordAge !== null && Date.now() - currentSnapshotState.firstRecordAge > backlogBufferAge;
+					currentSnapshotState.recordBuffer.push(r);
 
-				const backlogSize =
-					currentSnapshotState.trimSeqNum !== null ? currentSnapshotState.trimSeqNum + 1 - currentSnapshotState.lastProcessedTrimSeqNum : 0;
+					if (currentSnapshotState.firstRecordAge === null) {
+						currentSnapshotState.firstRecordAge = r.timestamp.getTime();
+					}
 
-				const backlogBytes = currentSnapshotState.recordBuffer.reduce((total, rec) => total + rec.body.length, 0);
+					if (isCatchingUp) {
+						continue;
+					}
 
-				const shouldSnapshot =
-					(backlogSize >= maxBacklog && leaseExpired) ||
-					(backlogBytes >= maxBacklogBytes && leaseExpired) ||
-					(firstRecordExpired && leaseExpired) ||
-					(currentSnapshotState.currentFencingToken && leaseExpired && backlogSize > 0);
+					const recordBytes = r.body;
+					server.send(recordBytes);
 
-				if (!shouldSnapshot || currentSnapshotState.blocked) {
-					continue;
+					const leaseExpired = (() => {
+						if (!currentSnapshotState.currentFencingToken) {
+							return true;
+						}
+						try {
+							const { deadline } = parseFencingToken(currentSnapshotState.currentFencingToken);
+							return Date.now() > deadline * 1000;
+						} catch {
+							logger.error(
+								'Invalid fencing token format',
+								{ room: roomName, token: currentSnapshotState.currentFencingToken },
+								'FencingTokenError',
+							);
+							// A token we cannot read holds no valid lease. Treat it like a missing token so
+							// a connection can take over the lease (using this token as the expected one)
+							// instead of every connection waiting on it forever.
+							return true;
+						}
+					})();
+
+					const firstRecordExpired =
+						currentSnapshotState.firstRecordAge !== null && Date.now() - currentSnapshotState.firstRecordAge > backlogBufferAge;
+
+					const backlogSize =
+						currentSnapshotState.trimSeqNum !== null
+							? currentSnapshotState.trimSeqNum + 1 - currentSnapshotState.lastProcessedTrimSeqNum
+							: 0;
+
+					const backlogBytes = currentSnapshotState.recordBuffer.reduce((total, rec) => total + rec.body.length, 0);
+
+					const shouldSnapshot =
+						(backlogSize >= maxBacklog && leaseExpired) ||
+						(backlogBytes >= maxBacklogBytes && leaseExpired) ||
+						(firstRecordExpired && leaseExpired) ||
+						(currentSnapshotState.currentFencingToken && leaseExpired && backlogSize > 0);
+
+					if (!shouldSnapshot || currentSnapshotState.blocked) {
+						continue;
+					}
+
+					currentSnapshotState.blocked = true;
+
+					const blockedState = currentSnapshotState;
+					takeSnapshot(
+						env,
+						leaseDuration,
+						roomName,
+						{ ...currentSnapshotState, recordBuffer: [...currentSnapshotState.recordBuffer] },
+						room,
+						logger,
+						() => {
+							blockedState.blocked = false;
+						},
+					);
 				}
-
-				currentSnapshotState.blocked = true;
-
-				const blockedState = currentSnapshotState;
-				takeSnapshot(
-					env,
-					leaseDuration,
-					roomName,
-					{ ...currentSnapshotState, recordBuffer: [...currentSnapshotState.recordBuffer] },
-					room,
-					logger,
-					() => {
-						blockedState.blocked = false;
-					},
-				);
+			} finally {
+				active = false;
 			}
 		};
 
