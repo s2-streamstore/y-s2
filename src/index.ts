@@ -166,7 +166,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 		const stream = s2Client.basin(env.S2_BASIN).stream(streamName);
 		const tailResponse = await stream.checkTail();
 
-		const tailSeqNum = tailResponse.tail.seq_num;
+		const tailSeqNum = tailResponse.tail.seqNum;
 
 		logger.info(
 			'Starting catchup from S2',
@@ -231,11 +231,12 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				attempts++;
 				try {
 					logger.info('Starting S2 event stream', { room, catchupSeqNum: currentCatchupSeqNum, attempt: attempts }, 'S2EventStream');
-					const session = await stream.readSession({
-						seq_num: currentCatchupSeqNum,
-						as: 'bytes',
-						clamp: true,
-					});
+					const session = await stream.readSession(
+						{
+							start: { from: { seqNum: currentCatchupSeqNum }, clamp: true },
+						},
+						{ as: 'bytes' },
+					);
 
 					return await processEventStream(session, currentCatchupSeqNum, currentSnapshotState);
 				} catch (err) {
@@ -253,7 +254,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
 						// Re-fetch tail to get current sequence number
 						const currentTail = await stream.checkTail();
-						const actualTailSeqNum = currentTail.tail.seq_num;
+						const actualTailSeqNum = currentTail.tail.seqNum;
 
 						if (currentCatchupSeqNum < actualTailSeqNum) {
 							logger.info(
@@ -324,13 +325,13 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			}
 
 			for await (const r of session) {
-				currentSnapshotState.trimSeqNum = r.seq_num;
+				currentSnapshotState.trimSeqNum = r.seqNum;
 
 				if (isFenceCommand(r)) {
-					if (r.seq_num > currentSnapshotState.lastProcessedFenceSeqNum) {
-						currentSnapshotState.currentFencingToken = r.body ? new TextDecoder().decode(r.body) : '';
-						currentSnapshotState.lastProcessedFenceSeqNum = r.seq_num;
-						if (!r.body) {
+					if (r.seqNum > currentSnapshotState.lastProcessedFenceSeqNum) {
+						currentSnapshotState.currentFencingToken = new TextDecoder().decode(r.body);
+						currentSnapshotState.lastProcessedFenceSeqNum = r.seqNum;
+						if (r.body.length === 0) {
 							currentSnapshotState.blocked = false;
 						}
 						logger.debug(
@@ -345,17 +346,16 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 					continue;
 				}
 
-				if (!r.body) {
+				if (r.body.length === 0) {
 					continue;
 				}
 
 				if (isTrimCommand(r)) {
-					const base64Body = btoa(String.fromCharCode(...r.body));
-					const trimSeqNum = decodeBigEndian64AsNumber(base64Body);
+					const trimSeqNum = decodeBigEndian64AsNumber(r.body);
 					if (trimSeqNum > currentSnapshotState.lastProcessedTrimSeqNum) {
 						currentSnapshotState.firstRecordAge = null;
 						currentSnapshotState.lastProcessedTrimSeqNum = trimSeqNum;
-						currentSnapshotState.recordBuffer = currentSnapshotState.recordBuffer.filter((rec) => rec.seq_num > trimSeqNum);
+						currentSnapshotState.recordBuffer = currentSnapshotState.recordBuffer.filter((rec) => rec.seqNum > trimSeqNum);
 						logger.debug(
 							'Received trim command',
 							{
@@ -371,18 +371,18 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 				currentSnapshotState.recordBuffer.push(r);
 
 				if (currentSnapshotState.firstRecordAge === null) {
-					currentSnapshotState.firstRecordAge = r.timestamp;
+					currentSnapshotState.firstRecordAge = r.timestamp.getTime();
 				}
 
 				if (isCatchingUp) {
-					if (r.seq_num + 1 >= tailSeqNum) {
+					if (r.seqNum + 1 >= tailSeqNum) {
 						isCatchingUp = false;
 						logger.info(
 							'Catchup completed, processing records',
 							{
 								room,
 								recordCount: currentSnapshotState.recordBuffer.length,
-								finalSeqNum: r.seq_num,
+								finalSeqNum: r.seqNum,
 							},
 							'S2Catchup',
 						);
@@ -395,7 +395,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 						ydoc.transact(() => {
 							for (const record of currentSnapshotState.recordBuffer) {
 								try {
-									if (!record.body) {
+									if (record.body.length === 0) {
 										continue;
 									}
 									const recordBytes: Uint8Array = record.body;
@@ -547,7 +547,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 						return;
 					}
 				}
-				batchWriter.write(AppendRecord.make(buffer)).catch((err: Error) => {
+				batchWriter.write(AppendRecord.bytes({ body: buffer })).catch((err: Error) => {
 					logger.error(
 						'Failed to submit message to batcher',
 						{
@@ -582,7 +582,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 			if (userState.awarenessId !== null) {
 				try {
 					const disconnectMessage = encodeAwarenessUserDisconnected(userState.awarenessId, userState.awarenessLastClock);
-					batchWriter.write(AppendRecord.make(disconnectMessage)).catch((err: Error) => {
+					batchWriter.write(AppendRecord.bytes({ body: disconnectMessage })).catch((err: Error) => {
 						logger.error(
 							'Failed to submit disconnect message',
 							{
@@ -718,10 +718,10 @@ async function takeSnapshot(
 		}
 
 		const { recordBuffer } = snapshotStateCopy;
-		if (recordBuffer.length > 0 && recordBuffer[0].seq_num < startSeqNum) {
+		if (recordBuffer.length > 0 && recordBuffer[0].seqNum < startSeqNum) {
 			logger.warn('Record buffer is stale, aborting snapshot', {
 				roomName,
-				firstRecordSeqNum: recordBuffer[0].seq_num,
+				firstRecordSeqNum: recordBuffer[0].seqNum,
 				startSeqNum,
 			});
 			ydoc.destroy();
@@ -730,7 +730,7 @@ async function takeSnapshot(
 
 		ydoc.transact(() => {
 			for (const record of recordBuffer) {
-				if (!record.body) {
+				if (record.body.length === 0) {
 					continue;
 				}
 
@@ -749,7 +749,7 @@ async function takeSnapshot(
 				} catch (err) {
 					logger.error('Failed to apply record during snapshot', {
 						roomName,
-						recordSeqNum: record.seq_num,
+						recordSeqNum: record.seqNum,
 						error: err,
 					});
 				}

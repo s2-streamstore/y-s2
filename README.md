@@ -50,6 +50,8 @@ SNAPSHOT_BACKLOG_SIZE=100             # Optional
 
 ### Deployment
 
+Requires Node.js 22 or newer.
+
 ```bash
 # Install dependencies
 npm install
@@ -60,6 +62,18 @@ npm run deploy
 # Or run locally for development
 npm run dev
 ```
+
+#### Continuous deployment
+
+Every push to `main` is checked (lint, format, typecheck, tests, build) and deployed to Cloudflare Workers by GitHub Actions. The workflow expects these repository secrets:
+
+| Secret                  | Description                                         |
+| ----------------------- | --------------------------------------------------- |
+| `CLOUDFLARE_API_TOKEN`  | API token with the "Edit Cloudflare Workers" scope  |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID                               |
+| `R2_BUCKET_NAME`        | R2 bucket used for snapshots                        |
+| `S2_ACCESS_TOKEN`       | S2 access token scoped to the basin                 |
+| `S2_BASIN`              | S2 basin name                                       |
 
 ### Client Integration
 
