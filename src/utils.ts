@@ -1,8 +1,8 @@
-import { S2, AppendInput, AppendRecord, type ReadRecord } from '@s2-dev/streamstore';
-import { fromUint8Array } from 'js-base64';
+import { S2, AppendInput, AppendRecord, randomToken, type ReadRecord } from '@s2-dev/streamstore';
 
 interface Config {
 	maxBacklog: number;
+	maxBacklogBytes: number;
 	batchSize: number;
 	lingerTime: number;
 	leaseDuration: number;
@@ -12,11 +12,23 @@ interface Config {
 export function parseConfig(env: any): Config {
 	return {
 		maxBacklog: env.SNAPSHOT_BACKLOG_SIZE ? parseInt(env.SNAPSHOT_BACKLOG_SIZE, 10) : 400,
+		maxBacklogBytes: env.SNAPSHOT_BACKLOG_BYTES ? parseInt(env.SNAPSHOT_BACKLOG_BYTES, 10) : 8 * 1024 * 1024,
 		batchSize: env.S2_BATCH_SIZE ? parseInt(env.S2_BATCH_SIZE, 10) : 8,
 		lingerTime: env.S2_LINGER_TIME ? parseInt(env.S2_LINGER_TIME, 10) : 50,
 		leaseDuration: env.LEASE_DURATION ? parseInt(env.LEASE_DURATION, 10) : 30,
 		backlogBufferAge: env.BACKLOG_BUFFER_AGE ? parseInt(env.BACKLOG_BUFFER_AGE, 10) : 60_000,
 	};
+}
+
+// Thrown when a read skips past records `from` (inclusive) to `to` (exclusive). Sequence numbers are
+// contiguous, so the stream was trimmed past them before this connection read them.
+export class MissingRecordsError extends Error {
+	constructor(
+		readonly from: number,
+		readonly to: number,
+	) {
+		super(`Records ${from}..${to - 1} are no longer in the stream`);
+	}
 }
 
 export function decodeBigEndian64AsNumber(bytes: Uint8Array): number {
@@ -70,9 +82,7 @@ export function parseFencingToken(token: string): { id: string; deadline: number
 
 export function generateDeadlineFencingToken(leaseDuration: number): string {
 	const newDeadline = Math.floor(Date.now() / 1000 + leaseDuration);
-	const id = crypto.getRandomValues(new Uint8Array(12));
-	const idBase64 = fromUint8Array(id);
-	return `${idBase64} ${newDeadline}`;
+	return `${randomToken(12)} ${newDeadline}`;
 }
 
 export class Room {
